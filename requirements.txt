@@ -5,3 +5,4 @@ google-auth>=2.38,<3
 scikit-learn>=1.5,<2
 pandas>=2.2,<3
 pydantic>=2.10,<3
+streamlit-cookies-controller==0.0.4

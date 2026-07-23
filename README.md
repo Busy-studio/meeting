@@ -71,3 +71,15 @@ streamlit run app.py
 ## 생성 비밀번호
 
 `MEETING_GENERATOR_PASSWORD`를 Streamlit Secrets에 설정해야 합니다. 사용자가 회의록 생성 버튼을 누르면 비밀번호 대화상자가 열리며, 이 값과 일치할 때만 API 호출과 회의록 생성이 실행됩니다. 비밀번호는 GitHub 코드에 직접 작성하지 마세요.
+
+## 브라우저 1회 인증
+
+비밀번호가 처음 확인되면 실제 비밀번호 대신 HMAC 서명 토큰을 브라우저 쿠키에 저장합니다.
+기본 인증 유지기간은 365일이며 `DEVICE_AUTH_DAYS`로 변경할 수 있습니다.
+브라우저 쿠키를 삭제하거나, `MEETING_GENERATOR_PASSWORD` 또는 `DEVICE_AUTH_SECRET`을 변경하면 다시 인증해야 합니다.
+
+```toml
+MEETING_GENERATOR_PASSWORD = "모두가-아는-4자리"
+DEVICE_AUTH_SECRET = "충분히-길고-무작위인-별도-서명키"
+DEVICE_AUTH_DAYS = 365
+```

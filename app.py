@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import random
+import time
+from datetime import datetime, timedelta, timezone
 
 import streamlit as st
+from streamlit_cookies_controller import CookieController
 
 from src.db import download_database, load_meetings
 from src.generator import generate_meeting
@@ -24,6 +29,12 @@ div[data-testid="stRadio"] label, div[data-testid="stSelectbox"] label {font-wei
 st.title("회의 뭐했니? v1.0")
 st.caption("더 이상 사다리타기가 두렵지 않습니다.")
 
+AUTH_COOKIE_NAME = "meeting_generator_auth_v1"
+
+if "cookie_controller" not in st.session_state:
+    st.session_state["cookie_controller"] = CookieController(key="meeting_generator_cookies")
+cookie_controller: CookieController = st.session_state["cookie_controller"]
+
 try:
     db_path = download_database()
     meetings = load_meetings(str(db_path))
@@ -32,11 +43,107 @@ except Exception as exc:
     st.stop()
 
 
-def _required_password() -> str:
-    value = st.secrets.get("MEETING_GENERATOR_PASSWORD")
+def _required_secret(name: str) -> str:
+    value = st.secrets.get(name)
     if value is None or not str(value).strip():
-        raise RuntimeError("필수 Secret이 없습니다: MEETING_GENERATOR_PASSWORD")
+        raise RuntimeError(f"필수 Secret이 없습니다: {name}")
     return str(value)
+
+
+def _required_password() -> str:
+    return _required_secret("MEETING_GENERATOR_PASSWORD")
+
+
+def _auth_secret() -> str:
+    return _required_secret("DEVICE_AUTH_SECRET")
+
+
+def _auth_days() -> int:
+    try:
+        days = int(st.secrets.get("DEVICE_AUTH_DAYS", 365))
+    except (TypeError, ValueError):
+        days = 365
+    return max(1, min(days, 3650))
+
+
+def _b64encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _b64decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode(value + padding)
+
+
+def _password_fingerprint(password: str) -> str:
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()[:16]
+
+
+def _create_auth_token(password: str) -> tuple[str, int]:
+    expires_at = int(time.time()) + (_auth_days() * 24 * 60 * 60)
+    payload = f"v1|{expires_at}|{_password_fingerprint(password)}"
+    signature = hmac.new(
+        _auth_secret().encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+    token = f"{_b64encode(payload.encode('utf-8'))}.{_b64encode(signature)}"
+    return token, expires_at
+
+
+def _is_valid_auth_token(token: object) -> bool:
+    if not isinstance(token, str) or "." not in token:
+        return False
+
+    try:
+        payload_part, signature_part = token.split(".", 1)
+        payload = _b64decode(payload_part).decode("utf-8")
+        supplied_signature = _b64decode(signature_part)
+        version, expires_text, password_fingerprint = payload.split("|", 2)
+        expires_at = int(expires_text)
+
+        if version != "v1" or expires_at <= int(time.time()):
+            return False
+        if not hmac.compare_digest(
+            password_fingerprint,
+            _password_fingerprint(_required_password()),
+        ):
+            return False
+
+        expected_signature = hmac.new(
+            _auth_secret().encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+        return hmac.compare_digest(supplied_signature, expected_signature)
+    except (ValueError, TypeError, UnicodeDecodeError, RuntimeError):
+        return False
+
+
+def _browser_is_authenticated() -> bool:
+    if st.session_state.get("browser_authenticated") is True:
+        return True
+
+    token = cookie_controller.get(AUTH_COOKIE_NAME)
+    valid = _is_valid_auth_token(token)
+    if valid:
+        st.session_state["browser_authenticated"] = True
+    return valid
+
+
+def _remember_browser(password: str) -> None:
+    token, expires_at = _create_auth_token(password)
+    expires = datetime.fromtimestamp(expires_at, tz=timezone.utc)
+    cookie_controller.set(
+        AUTH_COOKIE_NAME,
+        token,
+        path="/",
+        expires=expires,
+        max_age=float(_auth_days() * 24 * 60 * 60),
+        secure=True,
+        same_site="strict",
+    )
+    st.session_state["browser_authenticated"] = True
 
 
 def _create_meeting(request: dict[str, object]) -> None:
@@ -66,10 +173,20 @@ def _create_meeting(request: dict[str, object]) -> None:
     }
 
 
+def _run_pending_generation() -> None:
+    request = st.session_state.get("pending_generation")
+    if not request:
+        raise RuntimeError("생성 요청 정보가 없습니다. 다시 시도하세요.")
+
+    _create_meeting(request)
+    st.session_state.pop("pending_generation", None)
+    st.session_state.pop("generation_password", None)
+
+
 @st.dialog("비밀번호 확인", dismissible=True)
 def password_dialog() -> None:
-    st.write("회의록 생성을 계속하려면 비밀번호를 입력하세요.")
-    password = st.text_input("비밀번호", type="password", key="generation_password")
+    st.write("Hint: 모두가 아는 그 4자리")
+    password = st.text_input("비밀번호", type="password", key="generation_password", max_chars=64)
 
     if st.button("확인", type="primary", key="confirm_generation_password"):
         try:
@@ -79,23 +196,18 @@ def password_dialog() -> None:
             return
 
         if not hmac.compare_digest(password, expected):
+            st.session_state["generation_password"] = ""
             st.error("비밀번호가 올바르지 않습니다.")
             return
 
-        request = st.session_state.get("pending_generation")
-        if not request:
-            st.error("생성 요청 정보가 없습니다. 창을 닫고 다시 시도하세요.")
+        try:
+            _remember_browser(password)
+            with st.spinner("유사 회의와 실제 외부 참석자를 검색하고 있습니다..."):
+                _run_pending_generation()
+        except Exception as exc:
+            st.error(str(exc))
             return
 
-        with st.spinner("유사 회의와 실제 외부 참석자를 검색하고 있습니다..."):
-            try:
-                _create_meeting(request)
-            except Exception as exc:
-                st.error(str(exc))
-                return
-
-        st.session_state.pop("pending_generation", None)
-        st.session_state.pop("generation_password", None)
         st.rerun()
 
 
@@ -121,7 +233,7 @@ else:
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    generate_clicked = st.button("회의록 생성", type="primary")
+    generate_clicked = st.button("생성하기", type="primary")
 with col2:
     st.button("결과 초기화", on_click=lambda: st.session_state.pop("result", None))
 
@@ -135,7 +247,17 @@ if generate_clicked:
             "user_input": user_input,
             "keep_exact": keep_exact,
         }
-        password_dialog()
+
+        if _browser_is_authenticated():
+            with st.spinner("유사 회의와 실제 외부 참석자를 검색하고 있습니다..."):
+                try:
+                    _run_pending_generation()
+                except Exception as exc:
+                    st.error(str(exc))
+                else:
+                    st.rerun()
+        else:
+            password_dialog()
 
 if "result" in st.session_state:
     st.divider()
