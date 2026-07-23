@@ -34,6 +34,7 @@ OPENAI_API_KEY = "sk-..."
 OPENAI_MODEL = "gpt-4.1-mini"
 GCS_BUCKET_NAME = "버킷명"
 GCS_OBJECT_NAME = "meeting_DB.sqlite"
+MEETING_GENERATOR_PASSWORD = "원하는-생성-비밀번호"
 
 [gcp_service_account]
 # 서비스 계정 JSON의 모든 키를 TOML 형식으로 입력
@@ -65,3 +66,8 @@ streamlit run app.py
 - `followup_raw`
 - `project_name`
 - `research_project_name`
+
+
+## 생성 비밀번호
+
+`MEETING_GENERATOR_PASSWORD`를 Streamlit Secrets에 설정해야 합니다. 사용자가 회의록 생성 버튼을 누르면 비밀번호 대화상자가 열리며, 이 값과 일치할 때만 API 호출과 회의록 생성이 실행됩니다. 비밀번호는 GitHub 코드에 직접 작성하지 마세요.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import random
 
 import streamlit as st
@@ -30,16 +31,87 @@ except Exception as exc:
     st.error(f"DB를 불러오지 못했습니다. Streamlit Secrets와 GCS 권한을 확인하세요.\n\n{exc}")
     st.stop()
 
+
+def _required_password() -> str:
+    value = st.secrets.get("MEETING_GENERATOR_PASSWORD")
+    if value is None or not str(value).strip():
+        raise RuntimeError("필수 Secret이 없습니다: MEETING_GENERATOR_PASSWORD")
+    return str(value)
+
+
+def _create_meeting(request: dict[str, object]) -> None:
+    mode = str(request["mode"])
+    category = str(request.get("category") or "")
+    user_input = str(request.get("user_input") or "")
+    keep_exact = bool(request.get("keep_exact", False))
+
+    query = user_input.strip() if user_input.strip() else random.choice(CATEGORIES[category])
+    similar = search_similar(
+        meetings,
+        query=query,
+        category=category,
+        top_k=10,
+        randomize=(mode == "카테고리만 선택하여 자동 생성"),
+    )
+    participants = select_participants(similar, max_people=5)
+    if not participants:
+        raise RuntimeError("조건에 맞는 외부 참석자를 DB에서 찾지 못했습니다. 다른 카테고리나 키워드를 사용하세요.")
+
+    generated = generate_meeting(category or "사용자 입력 기반", user_input, similar, keep_exact)
+    st.session_state["result"] = {
+        "purpose": generated.meeting_purpose,
+        "participants": ", ".join(participants),
+        "content": "1. 회의내용\n" + "\n".join(f"- {x}" for x in generated.meeting_content)
+        + "\n\n2. 향후계획\n" + "\n".join(f"- {x}" for x in generated.future_plan),
+    }
+
+
+@st.dialog("비밀번호 확인", dismissible=True)
+def password_dialog() -> None:
+    st.write("회의록 생성을 계속하려면 비밀번호를 입력하세요.")
+    password = st.text_input("비밀번호", type="password", key="generation_password")
+
+    if st.button("확인", type="primary", key="confirm_generation_password"):
+        try:
+            expected = _required_password()
+        except RuntimeError as exc:
+            st.error(str(exc))
+            return
+
+        if not hmac.compare_digest(password, expected):
+            st.error("비밀번호가 올바르지 않습니다.")
+            return
+
+        request = st.session_state.get("pending_generation")
+        if not request:
+            st.error("생성 요청 정보가 없습니다. 창을 닫고 다시 시도하세요.")
+            return
+
+        with st.spinner("유사 회의와 실제 외부 참석자를 검색하고 있습니다..."):
+            try:
+                _create_meeting(request)
+            except Exception as exc:
+                st.error(str(exc))
+                return
+
+        st.session_state.pop("pending_generation", None)
+        st.session_state.pop("generation_password", None)
+        st.rerun()
+
+
 mode = st.radio(
     "생성 방식",
     ["카테고리만 선택하여 자동 생성", "키워드 또는 회의 목적 입력"],
     horizontal=True,
 )
-category = st.selectbox("카테고리", list(CATEGORIES.keys()))
 
+category = ""
 user_input = ""
 keep_exact = False
-if mode == "키워드 또는 회의 목적 입력":
+
+if mode == "카테고리만 선택하여 자동 생성":
+    category = st.selectbox("카테고리", list(CATEGORIES.keys()))
+else:
     user_input = st.text_area(
         "키워드 또는 회의 목적",
         placeholder="예: 수소전환 기술의 기업수요 발굴 및 후속 공동연구 협의",
@@ -57,26 +129,13 @@ if generate_clicked:
     if mode == "키워드 또는 회의 목적 입력" and not user_input.strip():
         st.warning("키워드 또는 회의 목적을 입력하세요.")
     else:
-        query = user_input.strip() if user_input.strip() else random.choice(CATEGORIES[category])
-        with st.spinner("유사 회의와 실제 외부 참석자를 검색하고 있습니다..."):
-            similar = search_similar(
-                meetings,
-                query=query,
-                category=category,
-                top_k=10,
-                randomize=(mode == "카테고리만 선택하여 자동 생성"),
-            )
-            participants = select_participants(similar, max_people=5)
-            if not participants:
-                st.error("조건에 맞는 외부 참석자를 DB에서 찾지 못했습니다. 다른 카테고리나 키워드를 사용하세요.")
-                st.stop()
-            generated = generate_meeting(category, user_input, similar, keep_exact)
-            st.session_state["result"] = {
-                "purpose": generated.meeting_purpose,
-                "participants": ", ".join(participants),
-                "content": "1. 회의내용\n" + "\n".join(f"- {x}" for x in generated.meeting_content)
-                + "\n\n2. 향후계획\n" + "\n".join(f"- {x}" for x in generated.future_plan),
-            }
+        st.session_state["pending_generation"] = {
+            "mode": mode,
+            "category": category,
+            "user_input": user_input,
+            "keep_exact": keep_exact,
+        }
+        password_dialog()
 
 if "result" in st.session_state:
     st.divider()
@@ -85,9 +144,3 @@ if "result" in st.session_state:
     result_box("1. 회의 목적", r["purpose"], "purpose", height=145)
     result_box("2. 참석자 명단", r["participants"], "participants", height=155)
     result_box("3. 회의 내용", r["content"], "content", height=330)
-    all_text = f"1. 회의 목적\n{r['purpose']}\n\n2. 참석자 명단\n{r['participants']}\n\n3. 회의 내용\n{r['content']}"
-    result_box("전체 내용", all_text, "all", height=390)
-
-with st.expander("운영 정보"):
-    st.write(f"정상 회의자료 {len(meetings):,}건을 검색 대상으로 사용 중입니다.")
-    st.write("참석자는 DB에서 확인된 외부 인물만 선택하며, 부산대학교기술지주 소속은 제외합니다.")
