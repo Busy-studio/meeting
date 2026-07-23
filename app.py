@@ -10,7 +10,7 @@ from src.generator import generate_meeting
 from src.retrieval import CATEGORIES, search_similar, select_participants
 from src.ui import result_box
 
-st.set_page_config(page_title="회의록 자동생성", page_icon="📝", layout="centered")
+st.set_page_config(page_title="회의 뭐했니? v1.0", page_icon="📝", layout="centered")
 
 st.markdown("""
 <style>
@@ -21,8 +21,8 @@ div[data-testid="stRadio"] label, div[data-testid="stSelectbox"] label {font-wei
 </style>
 """, unsafe_allow_html=True)
 
-st.title("회의록 자동생성")
-st.caption("비공개 회의록 DB 검색과 ChatGPT API를 결합하여 회의 목적·참석자·회의내용을 생성합니다.")
+st.title("회의 뭐했니? v1.0")
+st.caption("더 이상 사다리타기가 두렵지 않습니다.")
 
 try:
     db_path = download_database()
