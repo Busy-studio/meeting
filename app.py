@@ -15,7 +15,7 @@ from src.db import load_businesses, load_meetings, load_participant_links, save_
 from src.exporter import build_meeting_workbook, compose_content_block, export_filename
 from src.generator import generate_meeting
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
-from src.ui import business_from_state, render_business_form, trigger_file_download
+from src.ui import business_from_state, render_business_form
 
 
 st.set_page_config(page_title="회의 뭐했니? v1.1", page_icon="📝", layout="centered")
@@ -59,6 +59,27 @@ def _compose_amount_raw() -> str:
     if total <= 0 and supply <= 0 and vat <= 0:
         return ""
     return f"{total:,}원(공급가액: {supply:,} + 부가세액: {vat:,})"
+
+
+def _current_meeting_place() -> str:
+    selected = str(st.session_state.get("meeting_place_selector", "")).strip()
+    if selected == "직접 입력":
+        return str(st.session_state.get("meeting_place_custom", "")).strip()
+    return selected
+
+
+def _save_final_download(payload: dict[str, object]) -> None:
+    try:
+        saved = save_final_meeting(payload)
+        st.session_state["saved_meeting_id"] = int(saved["meeting_id"])
+        saved_business = saved.get("business") or {}
+        if saved_business.get("id"):
+            st.session_state["business_selected_id"] = saved_business["id"]
+        st.session_state["_final_save_success"] = "최종본을 저장했습니다."
+        st.session_state.pop("_final_save_error", None)
+    except Exception as exc:
+        st.session_state["_final_save_error"] = str(exc)
+        st.session_state.pop("_final_save_success", None)
 
 if "cookie_controller" not in st.session_state:
     st.session_state["cookie_controller"] = CookieController(key="meeting_generator_cookies")
@@ -275,8 +296,10 @@ if "meeting_date" not in st.session_state:
     st.session_state["meeting_date"] = now_kr.date()
 if "meeting_time" not in st.session_state:
     st.session_state["meeting_time"] = "11:00 ~ 13:00"
-for key in ("author_name", "meeting_place", "card_merchant"):
+for key in ("author_name", "card_merchant"):
     st.session_state.setdefault(key, "")
+st.session_state.setdefault("meeting_place_selector", "삼성산학협동관 303-2호")
+st.session_state.setdefault("meeting_place_custom", "")
 for key in ("amount_total", "amount_supply", "amount_vat"):
     st.session_state.setdefault(key, 0)
 
@@ -284,7 +307,17 @@ with st.expander("회의 기본정보", expanded=True):
     c1, c2 = st.columns(2)
     with c1:
         st.date_input("회의일자", key="meeting_date")
-        st.text_input("회의장소", key="meeting_place", placeholder="예: PNU AVEC 회의실")
+        st.selectbox(
+            "회의장소",
+            ["삼성산학협동관 303-2호", "PNU AVEC 회의실", "직접 입력"],
+            key="meeting_place_selector",
+        )
+        if st.session_state.get("meeting_place_selector") == "직접 입력":
+            st.text_input(
+                "회의장소 직접 입력",
+                key="meeting_place_custom",
+                placeholder="회의장소를 입력하세요.",
+            )
     with c2:
         st.text_input("회의시간", key="meeting_time", placeholder="예: 11:00 ~ 13:00")
         st.text_input("작성자", key="author_name")
@@ -358,7 +391,7 @@ if generate_clicked:
             "keep_exact": keep_exact,
             "business_name": business["name"],
         }
-        with st.spinner("Supabase에서 유사 회의를 찾고 GPT-5.6 Luna로 작성하고 있습니다..."):
+        with st.spinner("회의록을 생성하고 있습니다..."):
             try:
                 _run_pending_generation()
             except Exception as exc:
@@ -374,66 +407,76 @@ if "result" in st.session_state:
     st.text_area("회의 내용", key="edit_meeting_content", height=220)
     st.text_area("향후 계획", key="edit_future_plan", height=190)
 
-    if st.button("최종 회의록 생성", type="primary", key="final_excel_generate"):
-        try:
-            business = business_from_state()
-            if not business.get("name"):
-                raise RuntimeError("지원사업명을 입력하세요.")
-            purpose = str(st.session_state.get("edit_purpose", "")).strip()
-            participants = str(st.session_state.get("edit_participants", "")).strip()
-            meeting_content = str(st.session_state.get("edit_meeting_content", "")).strip()
-            future_plan = str(st.session_state.get("edit_future_plan", "")).strip()
-            if not purpose or not participants or not meeting_content:
-                raise RuntimeError("회의 목적, 참석자 명단, 회의 내용은 필수입니다.")
+    if st.session_state.pop("_final_save_success", None):
+        st.success("최종본을 저장했습니다.")
+    final_error = st.session_state.pop("_final_save_error", None)
+    if final_error:
+        st.error(final_error)
 
-            meeting_date = st.session_state["meeting_date"]
-            form = {
-                "business": business,
-                "meeting_date": meeting_date,
-                "meeting_time": str(st.session_state.get("meeting_time", "")).strip(),
-                "author_name": str(st.session_state.get("author_name", "")).strip(),
-                "meeting_place": str(st.session_state.get("meeting_place", "")).strip(),
-                "card_merchant": str(st.session_state.get("card_merchant", "")).strip(),
-                "amount_raw": _compose_amount_raw(),
-                "participants": participants,
-                "purpose": purpose,
-                "meeting_content": meeting_content,
-                "future_plan": future_plan,
-            }
-            workbook_bytes = build_meeting_workbook(form)
-            content_block = compose_content_block(meeting_content, future_plan)
-            payload = {
-                "meeting_id": st.session_state.get("saved_meeting_id"),
-                "business": business,
-                "meeting_date": meeting_date.isoformat(),
-                "meeting_time": form["meeting_time"],
-                "author_name": form["author_name"],
-                "meeting_place": form["meeting_place"],
-                "card_merchant": form["card_merchant"],
-                "amount_raw": form["amount_raw"],
-                "participants": participants,
-                "purpose": purpose,
-                "meeting_content": meeting_content,
-                "future_plan": future_plan,
-                "content_block": content_block,
-                "participant_items": parse_participants_for_save(participants),
-                "generated_original": st.session_state["result"].get("generated_original", {}),
-            }
-            saved = save_final_meeting(payload)
-            st.session_state["saved_meeting_id"] = int(saved["meeting_id"])
-            saved_business = saved.get("business") or {}
-            if saved_business.get("id"):
-                st.session_state["business_selected_id"] = saved_business["id"]
-            file_name = export_filename(
-                business["name"], meeting_date, form["author_name"]
-            )
-            st.session_state["export_bytes"] = workbook_bytes
-            st.session_state["export_filename"] = file_name
-            st.success(
-                f"최종본을 Supabase에 저장했습니다. "
-                f"(회의 ID {saved['meeting_id']}, 수정이력 {saved['revision_no']}) "
-                "Excel 다운로드를 시작합니다."
-            )
-            trigger_file_download(workbook_bytes, file_name)
-        except Exception as exc:
-            st.error(str(exc))
+    try:
+        business = business_from_state()
+        if not business.get("name"):
+            raise RuntimeError("지원사업명을 입력하세요.")
+
+        purpose = str(st.session_state.get("edit_purpose", "")).strip()
+        participants = str(st.session_state.get("edit_participants", "")).strip()
+        meeting_content = str(st.session_state.get("edit_meeting_content", "")).strip()
+        future_plan = str(st.session_state.get("edit_future_plan", "")).strip()
+        if not purpose or not participants or not meeting_content:
+            raise RuntimeError("회의 목적, 참석자 명단, 회의 내용은 필수입니다.")
+
+        meeting_date = st.session_state["meeting_date"]
+        meeting_place = _current_meeting_place()
+        if not meeting_place:
+            raise RuntimeError("회의장소를 입력하세요.")
+
+        form = {
+            "business": business,
+            "meeting_date": meeting_date,
+            "meeting_time": str(st.session_state.get("meeting_time", "")).strip(),
+            "author_name": str(st.session_state.get("author_name", "")).strip(),
+            "meeting_place": meeting_place,
+            "card_merchant": str(st.session_state.get("card_merchant", "")).strip(),
+            "amount_raw": _compose_amount_raw(),
+            "participants": participants,
+            "purpose": purpose,
+            "meeting_content": meeting_content,
+            "future_plan": future_plan,
+        }
+
+        workbook_bytes = build_meeting_workbook(form)
+        content_block = compose_content_block(meeting_content, future_plan)
+        payload = {
+            "meeting_id": st.session_state.get("saved_meeting_id"),
+            "business": business,
+            "meeting_date": meeting_date.isoformat(),
+            "meeting_time": form["meeting_time"],
+            "author_name": form["author_name"],
+            "meeting_place": meeting_place,
+            "card_merchant": form["card_merchant"],
+            "amount_raw": form["amount_raw"],
+            "participants": participants,
+            "purpose": purpose,
+            "meeting_content": meeting_content,
+            "future_plan": future_plan,
+            "content_block": content_block,
+            "participant_items": parse_participants_for_save(participants),
+            "generated_original": st.session_state["result"].get("generated_original", {}),
+        }
+        file_name = export_filename(
+            business["name"], meeting_date, form["author_name"]
+        )
+
+        st.download_button(
+            "최종 회의록 생성",
+            data=workbook_bytes,
+            file_name=file_name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            key="final_excel_generate",
+            on_click=_save_final_download,
+            args=(payload,),
+            use_container_width=True,
+        )
+    except Exception as exc:
+        st.error(str(exc))
