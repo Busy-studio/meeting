@@ -39,6 +39,27 @@ st.caption("더 이상 사다리타기가 두렵지 않습니다.")
 AUTH_COOKIE_NAME = "meeting_generator_auth_v1"
 EDIT_KEYS = ["edit_purpose", "edit_participants", "edit_meeting_content", "edit_future_plan"]
 
+
+def _recalculate_amount_breakdown() -> None:
+    total = int(st.session_state.get("amount_total", 0) or 0)
+    if total <= 0:
+        st.session_state["amount_supply"] = 0
+        st.session_state["amount_vat"] = 0
+        return
+    supply = int(round(total / 1.1))
+    vat = total - supply
+    st.session_state["amount_supply"] = supply
+    st.session_state["amount_vat"] = vat
+
+
+def _compose_amount_raw() -> str:
+    total = int(st.session_state.get("amount_total", 0) or 0)
+    supply = int(st.session_state.get("amount_supply", 0) or 0)
+    vat = int(st.session_state.get("amount_vat", 0) or 0)
+    if total <= 0 and supply <= 0 and vat <= 0:
+        return ""
+    return f"{total:,}원(공급가액: {supply:,} + 부가세액: {vat:,})"
+
 if "cookie_controller" not in st.session_state:
     st.session_state["cookie_controller"] = CookieController(key="meeting_generator_cookies")
 cookie_controller: CookieController = st.session_state["cookie_controller"]
@@ -254,19 +275,48 @@ if "meeting_date" not in st.session_state:
     st.session_state["meeting_date"] = now_kr.date()
 if "meeting_time" not in st.session_state:
     st.session_state["meeting_time"] = "11:00 ~ 13:00"
-for key in ("author_name", "meeting_place", "card_merchant", "amount_raw"):
+for key in ("author_name", "meeting_place", "card_merchant"):
     st.session_state.setdefault(key, "")
+for key in ("amount_total", "amount_supply", "amount_vat"):
+    st.session_state.setdefault(key, 0)
 
 with st.expander("회의 기본정보", expanded=True):
     c1, c2 = st.columns(2)
     with c1:
         st.date_input("회의일자", key="meeting_date")
         st.text_input("회의장소", key="meeting_place", placeholder="예: PNU AVEC 회의실")
-        st.text_input("소요금액", key="amount_raw", placeholder="예: 340,000원(공급가액: ... + 부가세액: ...)")
     with c2:
         st.text_input("회의시간", key="meeting_time", placeholder="예: 11:00 ~ 13:00")
         st.text_input("작성자", key="author_name")
-        st.text_input("카드 사용처", key="card_merchant")
+
+    amount_c1, amount_c2, amount_c3 = st.columns(3)
+    with amount_c1:
+        st.number_input(
+            "소요금액",
+            min_value=0,
+            step=1000,
+            key="amount_total",
+            on_change=_recalculate_amount_breakdown,
+            help="총액을 입력하면 공급가액과 부가세액이 자동 계산됩니다.",
+        )
+    with amount_c2:
+        st.number_input(
+            "공급가액",
+            min_value=0,
+            step=1,
+            key="amount_supply",
+            help="자동 계산값을 필요에 따라 직접 수정할 수 있습니다.",
+        )
+    with amount_c3:
+        st.number_input(
+            "부가세액",
+            min_value=0,
+            step=1,
+            key="amount_vat",
+            help="자동 계산값을 필요에 따라 직접 수정할 수 있습니다.",
+        )
+
+    st.text_input("카드 사용처", key="card_merchant")
 
 st.subheader("2. 회의내용 정보")
 mode = st.radio(
@@ -344,7 +394,7 @@ if "result" in st.session_state:
                 "author_name": str(st.session_state.get("author_name", "")).strip(),
                 "meeting_place": str(st.session_state.get("meeting_place", "")).strip(),
                 "card_merchant": str(st.session_state.get("card_merchant", "")).strip(),
-                "amount_raw": str(st.session_state.get("amount_raw", "")).strip(),
+                "amount_raw": _compose_amount_raw(),
                 "participants": participants,
                 "purpose": purpose,
                 "meeting_content": meeting_content,
