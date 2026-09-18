@@ -87,6 +87,11 @@ def render_business_form(
     if not options:
         options = ["＋ 새로운 사업 직접 입력"]
 
+    # Widget key values must be restored before the widgets are instantiated.
+    pending_restore = st.session_state.pop("_pending_business_restore", None)
+    if isinstance(pending_restore, dict):
+        apply_business_to_state(pending_restore)
+
     requested = st.session_state.pop("_requested_business_name", None)
     if requested in options:
         st.session_state["business_selector"] = requested
@@ -99,6 +104,10 @@ def render_business_form(
         apply_business_to_state(None if is_new else by_name.get(selected))
         st.session_state["_last_business_selector"] = selected
         st.session_state["_business_edit_mode"] = bool(is_new)
+
+    flash = st.session_state.pop("_business_flash", None)
+    if flash:
+        st.success(str(flash))
 
     edit_mode = bool(st.session_state.get("_business_edit_mode", is_new))
 
@@ -119,21 +128,24 @@ def render_business_form(
                         st.error("사업 정보 저장 기능이 연결되지 않았습니다.")
                     else:
                         try:
+                            # Read the widget values, save them, then rerun.
+                            # Do not rewrite widget-backed session_state in this same run.
                             saved = save_business_callback(business_from_state())
                             saved_name = str(saved.get("name") or "").strip()
                             if saved_name:
                                 st.session_state["_requested_business_name"] = saved_name
-                                st.session_state["_last_business_selector"] = saved_name
-                            apply_business_to_state(saved)
                             st.session_state["_business_edit_mode"] = False
-                            st.success("사업 기본정보를 저장했습니다.")
+                            st.session_state["_business_flash"] = "사업 기본정보를 저장했습니다."
                             st.rerun()
                         except Exception as exc:
                             st.error(str(exc))
             with c2:
                 if st.button("취소", key="business_edit_cancel"):
                     original = by_name.get(selected)
-                    apply_business_to_state(original)
+                    if isinstance(original, dict):
+                        # Restore on the next rerun, before widgets are recreated.
+                        st.session_state["_pending_business_restore"] = original
+                        st.session_state["_requested_business_name"] = selected
                     st.session_state["_business_edit_mode"] = False
                     st.rerun()
 
