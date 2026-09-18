@@ -200,7 +200,7 @@ def _run_pending_generation() -> None:
 
 def _render_login_gate() -> None:
     st.subheader("비밀번호 확인")
-    st.caption("회의록 자동생성기를 사용하려면 비밀번호를 입력하세요.")
+    st.caption("무슨 회의를 했는지 궁금하시면 비밀번호를 입력하세요.")
     with st.form("initial_login_form"):
         password = st.text_input(
             "비밀번호",
