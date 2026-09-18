@@ -27,11 +27,16 @@ INTERNAL_ORG_PATTERNS = (
     "부산대 산학협력단", "부산대산학협력단",
 )
 TITLE_WORDS = (
-    "대표이사", "대표", "부대표", "이사", "상무", "전무", "부장", "차장", "과장", "팀장",
-    "실장", "센터장", "본부장", "소장", "원장", "책임연구원", "수석연구원", "선임연구원",
-    "연구원", "교수", "부교수", "조교수", "변리사", "박사", "전문위원", "매니저", "주임",
+    "대표이사", "부대표", "전무이사", "상무이사", "책임심사역", "수석부주임",
+    "책임연구원", "수석연구원", "선임연구원", "전문위원", "센터장", "본부장",
+    "대표", "이사", "상무", "전무", "부장", "차장", "과장", "팀장", "실장",
+    "소장", "원장", "연구원", "교수", "부교수", "조교수", "변리사", "회계사",
+    "박사", "매니저", "지사장", "주임", "대리", "사원",
 )
+TITLE_SET = set(TITLE_WORDS)
+TITLE_ALT = "|".join(sorted((re.escape(x) for x in TITLE_WORDS), key=len, reverse=True))
 NAME_RE = re.compile(r"^[가-힣]{2,4}$")
+ATTACHED_NAME_TITLE_RE = re.compile(rf"^([가-힣]{{2,4}})({TITLE_ALT})$")
 
 
 @dataclass(frozen=True)
@@ -40,7 +45,6 @@ class Participant:
     name: str
     title: str
     meeting_id: int
-    meeting_text: str
 
     @property
     def display(self) -> str:
@@ -51,12 +55,24 @@ def _clean(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+def _normalize_org(text: str) -> str:
+    compact = re.sub(r"\s+", "", str(text or ""))
+    compact = compact.replace("주식회사", "").replace("㈜", "").replace("(주)", "").replace("（주）", "")
+    return compact.strip("()（）")
+
+
+def _normalize_name(text: str) -> str:
+    return re.sub(r"\s+", "", str(text or "")).strip()
+
+
 def build_search_text(df: pd.DataFrame) -> pd.Series:
     cols = ["meeting_purpose_raw", "discussion_raw", "followup_raw", "project_name", "research_project_name"]
     return df[cols].agg(" ".join, axis=1).map(_clean)
 
 
 def search_similar(df: pd.DataFrame, query: str, category: str, top_k: int = 10, randomize: bool = False) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
     texts = build_search_text(df)
     category_terms = " ".join(CATEGORIES.get(category, (category,)))
     effective_query = _clean(f"{query} {category_terms}")
@@ -79,50 +95,29 @@ def search_similar(df: pd.DataFrame, query: str, category: str, top_k: int = 10,
 
 
 def _is_internal(text: str) -> bool:
-    compact = re.sub(r"\s+", "", text)
+    compact = re.sub(r"\s+", "", str(text or ""))
     return any(re.sub(r"\s+", "", p) in compact for p in INTERNAL_ORG_PATTERNS)
 
 
-def parse_participants(raw: str, meeting_id: int, meeting_text: str) -> list[Participant]:
-    raw = str(raw or "").replace("ㆍ", ",").replace("·", ",")
-    fragments = [x.strip(" -•\t") for x in re.split(r"[,;\n]+", raw) if x.strip()]
-    result: list[Participant] = []
-    carry_org = ""
-    for frag in fragments:
-        if _is_internal(frag):
-            carry_org = ""
-            continue
-        tokens = frag.split()
-        name_idx = next((i for i, t in enumerate(tokens) if NAME_RE.match(t) and t not in TITLE_WORDS), None)
-        if name_idx is None:
-            if len(tokens) <= 4:
-                carry_org = frag
-            continue
-        before = tokens[:name_idx]
-        after = tokens[name_idx + 1 :]
-        organization = " ".join(before).strip() or carry_org
-        name = tokens[name_idx]
-        title = " ".join(after).strip()
-        if not title and organization:
-            possible = organization.split()
-            if possible and possible[-1] in TITLE_WORDS:
-                title = possible[-1]
-                organization = " ".join(possible[:-1])
-        if not organization or _is_internal(organization):
-            continue
-        if title and len(title) > 20:
-            title = ""
-        result.append(Participant(_clean(organization), name, _clean(title), meeting_id, meeting_text))
-        carry_org = organization
-    return result
+def select_participants(similar: pd.DataFrame, participant_links: pd.DataFrame, max_people: int = 5) -> list[str]:
+    if similar.empty:
+        return []
 
-
-def select_participants(similar: pd.DataFrame, max_people: int = 5) -> list[str]:
-    candidates: list[tuple[float, Participant]] = []
+    score_by_meeting: dict[int, float] = {}
     for rank, row in enumerate(similar.itertuples(index=False)):
-        score = float(getattr(row, "similarity", 0.0)) + max(0, 0.05 - rank * 0.004)
-        for p in parse_participants(row.participants_raw, int(row.id), row.search_text):
-            candidates.append((score, p))
+        score_by_meeting[int(row.id)] = float(getattr(row, "similarity", 0.0)) + max(0, 0.05 - rank * 0.004)
+
+    candidates: list[tuple[float, Participant]] = []
+    if not participant_links.empty:
+        subset = participant_links[participant_links["meeting_id"].isin(score_by_meeting.keys())]
+        for row in subset.itertuples(index=False):
+            org = _clean(row.organization)
+            name = _clean(row.name)
+            title = _clean(row.title)
+            if not name or not org or _is_internal(org):
+                continue
+            candidates.append((score_by_meeting.get(int(row.meeting_id), 0.0), Participant(org, name, title, int(row.meeting_id))))
+
     candidates.sort(key=lambda x: x[0], reverse=True)
     selected: list[str] = []
     seen_names: set[str] = set()
@@ -134,3 +129,69 @@ def select_participants(similar: pd.DataFrame, max_people: int = 5) -> list[str]
         if len(selected) >= max_people:
             break
     return selected
+
+
+def _split_name_title(tokens: list[str]) -> tuple[int | None, str, str]:
+    for i, token in enumerate(tokens):
+        m = ATTACHED_NAME_TITLE_RE.match(token)
+        if m:
+            return i, m.group(1), m.group(2)
+        if NAME_RE.match(token) and token not in TITLE_SET:
+            title = ""
+            if i + 1 < len(tokens) and tokens[i + 1] in TITLE_SET:
+                title = tokens[i + 1]
+            return i, token, title
+    return None, "", ""
+
+
+def parse_participants_for_save(raw: str) -> list[dict[str, str]]:
+    """Parse only relationships written in the final participant text.
+
+    Organization carry-over is limited to the same line. Nothing is inferred from
+    another meeting, which prevents same-name / affiliation mixing.
+    """
+    result: list[dict[str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    text = str(raw or "").replace("ㆍ", ",").replace("·", ",")
+
+    for line in text.splitlines() or [text]:
+        carry_org = ""
+        fragments = [x.strip(" -•\t") for x in re.split(r"[,;]+", line) if x.strip()]
+        for frag in fragments:
+            tokens = frag.split()
+            if not tokens:
+                continue
+            idx, name, attached_title = _split_name_title(tokens)
+            if idx is None:
+                # A short fragment with no person can establish organization only within this line.
+                if len(tokens) <= 6 and not any(t in TITLE_SET for t in tokens):
+                    carry_org = frag
+                continue
+
+            before = tokens[:idx]
+            after = tokens[idx + 1 :]
+            org = _clean(" ".join(before)) or carry_org
+            title = attached_title
+            if not title and after and after[0] in TITLE_SET:
+                title = after[0]
+
+            if org and org in TITLE_SET:
+                org = ""
+            if org:
+                carry_org = org
+
+            key = (_normalize_name(name), _normalize_org(org), title)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                {
+                    "name": name,
+                    "normalized_name": _normalize_name(name),
+                    "organization": org,
+                    "normalized_organization": _normalize_org(org),
+                    "title": title,
+                    "raw_fragment": frag,
+                }
+            )
+    return result
