@@ -103,3 +103,10 @@ def save_final_meeting(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict) or not result.get("meeting_id"):
         raise RuntimeError("Supabase에서 최종 회의록 저장 결과를 확인하지 못했습니다.")
     return result
+
+
+def save_business(payload: dict[str, Any]) -> dict[str, Any]:
+    result = _rpc("meeting_app_upsert_business", {"payload": payload})
+    if not isinstance(result, dict) or not result.get("id"):
+        raise RuntimeError("Supabase에서 사업 정보 저장 결과를 확인하지 못했습니다.")
+    return result

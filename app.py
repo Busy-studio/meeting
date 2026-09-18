@@ -11,11 +11,11 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 from streamlit_cookies_controller import CookieController
 
-from src.db import load_businesses, load_meetings, load_participant_links, save_final_meeting
+from src.db import load_businesses, load_meetings, load_participant_links, save_business, save_final_meeting
 from src.exporter import build_meeting_workbook, compose_content_block, export_filename
 from src.generator import generate_meeting
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
-from src.ui import business_from_state, render_business_form
+from src.ui import business_from_state, render_business_form, trigger_file_download
 
 
 st.set_page_config(page_title="회의 뭐했니? v1.1", page_icon="📝", layout="centered")
@@ -34,7 +34,7 @@ textarea {line-height:1.65 !important;}
 )
 
 st.title("회의 뭐했니? v1.1")
-st.caption("회의 내용을 만들고, 직접 다듬고, 기존 회의록 양식으로 바로 출력합니다.")
+st.caption("더 이상 사다리타기가 두렵지 않습니다.")
 
 AUTH_COOKIE_NAME = "meeting_generator_auth_v1"
 EDIT_KEYS = ["edit_purpose", "edit_participants", "edit_meeting_content", "edit_future_plan"]
@@ -229,7 +229,7 @@ except Exception as exc:
     st.stop()
 
 st.subheader("1. 사업 및 회의 기본정보")
-business = render_business_form(businesses)
+business = render_business_form(businesses, save_business)
 
 now_kr = datetime.now(ZoneInfo("Asia/Seoul"))
 if "meeting_date" not in st.session_state:
@@ -250,7 +250,7 @@ with st.expander("회의 기본정보", expanded=True):
         st.text_input("작성자", key="author_name")
         st.text_input("카드 사용처", key="card_merchant")
 
-st.subheader("2. AI 회의내용 생성")
+st.subheader("2. 회의내용 정보")
 mode = st.radio(
     "생성 방식",
     ["카테고리만 선택하여 자동 생성", "키워드 또는 회의 목적 입력"],
@@ -272,7 +272,7 @@ else:
 
 col1, col2 = st.columns([3, 1])
 with col1:
-    generate_clicked = st.button("AI 회의내용 생성", type="primary")
+    generate_clicked = st.button("회의내용 생성", type="primary")
 with col2:
     st.button("결과 초기화", on_click=_clear_result)
 
@@ -303,15 +303,13 @@ if generate_clicked:
 
 if "result" in st.session_state:
     st.divider()
-    st.subheader("3. 생성 결과 직접 수정")
-    st.caption("아래 내용은 모두 수정할 수 있습니다. 최종 Excel 생성 시 현재 화면의 내용이 DB와 Excel에 반영됩니다.")
+    st.caption("아래 내용은 모두 수정할 수 있습니다. 최종 회의록 생성 시 현재 화면의 내용이 DB와 Excel에 반영됩니다.")
     st.text_area("회의 목적", key="edit_purpose", height=110)
     st.text_area("참석자 명단", key="edit_participants", height=150)
     st.text_area("회의 내용", key="edit_meeting_content", height=220)
     st.text_area("향후 계획", key="edit_future_plan", height=190)
 
-    st.subheader("4. 최종 회의록 생성")
-    if st.button("최종 회의록 Excel 생성", type="primary", key="final_excel_generate"):
+    if st.button("최종 회의록 생성", type="primary", key="final_excel_generate"):
         try:
             business = business_from_state()
             if not business.get("name"):
@@ -361,19 +359,16 @@ if "result" in st.session_state:
             saved_business = saved.get("business") or {}
             if saved_business.get("id"):
                 st.session_state["business_selected_id"] = saved_business["id"]
-            st.session_state["export_bytes"] = workbook_bytes
-            st.session_state["export_filename"] = export_filename(
+            file_name = export_filename(
                 business["name"], meeting_date, form["author_name"]
             )
-            st.success(f"최종본을 Supabase에 저장했습니다. (회의 ID {saved['meeting_id']}, 수정이력 {saved['revision_no']})")
+            st.session_state["export_bytes"] = workbook_bytes
+            st.session_state["export_filename"] = file_name
+            st.success(
+                f"최종본을 Supabase에 저장했습니다. "
+                f"(회의 ID {saved['meeting_id']}, 수정이력 {saved['revision_no']}) "
+                "Excel 다운로드를 시작합니다."
+            )
+            trigger_file_download(workbook_bytes, file_name)
         except Exception as exc:
             st.error(str(exc))
-
-    if st.session_state.get("export_bytes"):
-        st.download_button(
-            "Excel 다운로드",
-            data=st.session_state["export_bytes"],
-            file_name=st.session_state.get("export_filename", "회의록.xlsx"),
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
