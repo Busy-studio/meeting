@@ -198,28 +198,46 @@ def _run_pending_generation() -> None:
     st.session_state.pop("generation_password", None)
 
 
-@st.dialog("비밀번호 확인", dismissible=True)
-def password_dialog() -> None:
-    st.write("Hint: 모두가 아는 그 4자리")
-    password = st.text_input("비밀번호", type="password", key="generation_password", max_chars=64)
-    if st.button("확인", type="primary", key="confirm_generation_password"):
-        try:
-            expected = _required_password()
-        except RuntimeError as exc:
-            st.error(str(exc))
-            return
-        if not hmac.compare_digest(password, expected):
-            st.session_state["generation_password"] = ""
-            st.error("비밀번호가 올바르지 않습니다.")
-            return
-        try:
-            _remember_browser(password)
-            with st.spinner("Supabase에서 유사 회의와 실제 참석자 정보를 찾고 있습니다..."):
-                _run_pending_generation()
-        except Exception as exc:
-            st.error(str(exc))
-            return
-        st.rerun()
+def _render_login_gate() -> None:
+    st.subheader("비밀번호 확인")
+    st.caption("회의록 자동생성기를 사용하려면 비밀번호를 입력하세요.")
+    with st.form("initial_login_form"):
+        password = st.text_input(
+            "비밀번호",
+            type="password",
+            key="initial_login_password",
+            max_chars=64,
+            placeholder="비밀번호 입력",
+        )
+        submitted = st.form_submit_button("로그인", type="primary", use_container_width=True)
+
+    if not submitted:
+        return
+
+    try:
+        expected = _required_password()
+    except RuntimeError as exc:
+        st.error(str(exc))
+        return
+
+    if not hmac.compare_digest(password, expected):
+        st.session_state["initial_login_password"] = ""
+        st.error("비밀번호가 올바르지 않습니다.")
+        return
+
+    try:
+        _remember_browser(password)
+        st.session_state.pop("initial_login_password", None)
+    except Exception as exc:
+        st.error(str(exc))
+        return
+
+    st.rerun()
+
+
+if not _browser_is_authenticated():
+    _render_login_gate()
+    st.stop()
 
 
 try:
@@ -290,16 +308,13 @@ if generate_clicked:
             "keep_exact": keep_exact,
             "business_name": business["name"],
         }
-        if _browser_is_authenticated():
-            with st.spinner("Supabase에서 유사 회의를 찾고 GPT-5.6 Luna로 작성하고 있습니다..."):
-                try:
-                    _run_pending_generation()
-                except Exception as exc:
-                    st.error(str(exc))
-                else:
-                    st.rerun()
-        else:
-            password_dialog()
+        with st.spinner("Supabase에서 유사 회의를 찾고 GPT-5.6 Luna로 작성하고 있습니다..."):
+            try:
+                _run_pending_generation()
+            except Exception as exc:
+                st.error(str(exc))
+            else:
+                st.rerun()
 
 if "result" in st.session_state:
     st.divider()
