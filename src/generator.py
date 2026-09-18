@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 class GeneratedMeeting(BaseModel):
-    meeting_purpose: str = Field(min_length=5, max_length=180)
+    meeting_purpose: str = Field(min_length=5, max_length=220)
     meeting_content: list[str] = Field(min_length=3, max_length=3)
     future_plan: list[str] = Field(min_length=3, max_length=3)
 
@@ -47,15 +47,22 @@ def _extract_json(text: str) -> dict[str, Any]:
         return json.loads(match.group(0))
 
 
-def generate_meeting(category: str, user_input: str, similar: pd.DataFrame, keep_exact_purpose: bool) -> GeneratedMeeting:
+def generate_meeting(
+    category: str,
+    user_input: str,
+    similar: pd.DataFrame,
+    keep_exact_purpose: bool,
+    business_name: str,
+) -> GeneratedMeeting:
     client = OpenAI(api_key=_secret("OPENAI_API_KEY"))
-    model = _secret("OPENAI_MODEL", "gpt-4.1-mini")
+    model = _secret("OPENAI_MODEL", "gpt-5.6-luna")
     exact_instruction = (
         "사용자가 입력한 문장을 meeting_purpose에 글자 하나 바꾸지 말고 그대로 사용한다."
         if keep_exact_purpose and user_input.strip()
         else "사용자 입력을 참고하되 회의 목적을 새로 작성하거나 명사형 문장으로 다듬는다."
     )
     prompt = f"""
+지원사업: {business_name or '(미지정)'}
 카테고리: {category}
 사용자 입력: {user_input or '(입력 없음)'}
 
@@ -80,11 +87,15 @@ def generate_meeting(category: str, user_input: str, similar: pd.DataFrame, keep
 - 참석자 이름이나 소속은 출력하지 않음
 - 중복 문장 금지
 """.strip()
+
     response = client.responses.create(
         model=model,
         instructions="당신은 대학 기술사업화·산학협력 회의록을 작성하는 전문 행정 실무자다.",
         input=prompt,
-        temperature=0.8,
+        reasoning={"effort": "low"},
+        # GPT-5.6 uses an implicit prompt-cache breakpoint by default.
+        # Explicit mode with no breakpoints disables that implicit cache usage.
+        prompt_cache_options={"mode": "explicit"},
     )
     try:
         result = GeneratedMeeting.model_validate(_extract_json(response.output_text))
