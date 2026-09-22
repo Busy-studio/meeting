@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter, Transformation
@@ -21,62 +22,69 @@ from reportlab.pdfgen import canvas
 
 
 def _ensure_one_page_print_setup(workbook: bytes) -> bytes:
-    """Set Calc's fit-to-one-page print flags without modifying the Excel export."""
+    """Configure only the temporary PDF copy, with namespace-aware OOXML."""
+    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    def tag(name: str) -> str:
+        return f"{{{ns}}}{name}"
+
     with zipfile.ZipFile(io.BytesIO(workbook), "r") as source:
+        sheet = ET.fromstring(source.read("xl/worksheets/sheet1.xml"))
+        props = sheet.find(tag("sheetPr"))
+        if props is None:
+            props = ET.Element(tag("sheetPr"))
+            sheet.insert(0, props)
+        fit = props.find(tag("pageSetUpPr"))
+        if fit is None:
+            fit = ET.SubElement(props, tag("pageSetUpPr"))
+        fit.set("fitToPage", "1")
+        fit.set("autoPageBreaks", "0")
+        for name in ("rowBreaks", "colBreaks"):
+            for node in list(sheet.findall(tag(name))):
+                sheet.remove(node)
+        setup = sheet.find(tag("pageSetup"))
+        if setup is None:
+            setup = ET.Element(tag("pageSetup"))
+            margins = sheet.find(tag("pageMargins"))
+            if margins is None:
+                margins = ET.Element(tag("pageMargins"), {
+                    "left": "0.7", "right": "0.7", "top": "0.75",
+                    "bottom": "0.75", "header": "0.3", "footer": "0.3",
+                })
+                # These elements precede pageMargins in the worksheet schema.
+                predecessors = {tag(n) for n in (
+                    "sheetPr", "dimension", "sheetViews", "sheetFormatPr", "cols",
+                    "sheetData", "sheetCalcPr", "sheetProtection", "protectedRanges",
+                    "scenarios", "autoFilter", "sortState", "dataConsolidate",
+                    "customSheetViews", "mergeCells", "phoneticPr",
+                    "conditionalFormatting", "dataValidations", "hyperlinks", "printOptions",
+                )}
+                index = max((i + 1 for i, child in enumerate(sheet)
+                             if child.tag in predecessors), default=0)
+                sheet.insert(index, margins)
+            sheet.insert(list(sheet).index(margins) + 1, setup)
+        setup.attrib.pop("scale", None)
+        setup.attrib.update(fitToWidth="1", fitToHeight="1", paperSize="9", orientation="portrait")
+
+        book = ET.fromstring(source.read("xl/workbook.xml"))
+        sheets = book.find(tag("sheets"))
+        if sheets is None or not len(sheets):
+            raise RuntimeError("회의록 Excel 시트를 찾을 수 없습니다.")
+        # The exporter fills sheet1; the other sheet contains lookup data only.
+        sheets[0].set("state", "visible")
+        for other in list(sheets)[1:]:
+            other.set("state", "hidden")
+        for view in book.iter(tag("workbookView")):
+            view.set("activeTab", "0")
+            view.set("firstSheet", "0")
+
         output = io.BytesIO()
-        with zipfile.ZipFile(output, "w") as target:
+        with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target:
             for entry in source.infolist():
                 content = source.read(entry.filename)
                 if entry.filename == "xl/worksheets/sheet1.xml":
-                    xml = content.decode("utf-8")
-                    if re.search(r"<(?:\w+:)?sheetPr\b", xml):
-                        if not re.search(r"<(?:\w+:)?pageSetUpPr\b", xml):
-                            xml = re.sub(
-                                r"(<(?:\w+:)?sheetPr\b[^>]*>)",
-                                r'\1<pageSetUpPr fitToPage="1"/>',
-                                xml,
-                                count=1,
-                            )
-                        else:
-                            xml = re.sub(
-                                r"<((?:\w+:)?pageSetUpPr)\b[^>]*/>",
-                                r'<\1 fitToPage="1"/>',
-                                xml,
-                                count=1,
-                            )
-                    else:
-                        xml = re.sub(
-                            r"(<(?:\w+:)?worksheet\b[^>]*>)",
-                            r'\1<sheetPr><pageSetUpPr fitToPage="1"/></sheetPr>',
-                            xml,
-                            count=1,
-                        )
-
-                    setup_match = re.search(r"<((?:\w+:)?pageSetup)\b[^>]*/>", xml)
-                    if setup_match:
-                        tag = setup_match.group(1)
-                        original = setup_match.group(0)
-                        updated = original
-                        for name in ("fitToWidth", "fitToHeight"):
-                            if re.search(rf'\b{name}="[^"]*"', updated):
-                                updated = re.sub(rf'\b{name}="[^"]*"', f'{name}="1"', updated)
-                            else:
-                                updated = updated.replace("/>", f' {name}="1"/>')
-                        xml = xml.replace(original, updated, 1)
-                    else:
-                        # pageSetup belongs after pageMargins and before headerFooter.
-                        margin = re.search(r"<(?:\w+:)?pageMargins\b[^>]*/>", xml)
-                        if margin:
-                            i = margin.end()
-                            xml = xml[:i] + '<pageSetup fitToWidth="1" fitToHeight="1"/>' + xml[i:]
-                        else:
-                            footer = re.search(r"<(?:\w+:)?headerFooter\b", xml)
-                            if footer:
-                                i = footer.start()
-                            else:
-                                i = xml.rfind("</")
-                            xml = xml[:i] + '<pageSetup fitToWidth="1" fitToHeight="1"/>' + xml[i:]
-                    content = xml.encode("utf-8")
+                    content = ET.tostring(sheet, encoding="utf-8", xml_declaration=True)
+                elif entry.filename == "xl/workbook.xml":
+                    content = ET.tostring(book, encoding="utf-8", xml_declaration=True)
                 target.writestr(entry, content)
         return output.getvalue()
 
