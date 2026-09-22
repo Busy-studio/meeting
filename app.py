@@ -20,6 +20,7 @@ from src.receipt import (
     analyze_receipt_pdf,
     format_business_number,
     lookup_business_status,
+    normalize_business_number,
     meeting_window_from_payment_time,
     parse_payment_date,
 )
@@ -83,6 +84,12 @@ def _compose_amount_raw() -> str:
     if total <= 0 and supply <= 0 and vat <= 0:
         return ""
     return f"{total:,}원(공급가액: {supply:,} + 부가세액: {vat:,})"
+
+
+def _receipt_business_number_changed() -> None:
+    # 사용자가 OCR 결과를 수정하면 이전 국세청 조회결과는 더 이상 유효하지 않다.
+    st.session_state["_receipt_status"] = {}
+    st.session_state["_receipt_business_number_queried"] = ""
 
 
 def _current_meeting_place() -> str:
@@ -343,9 +350,10 @@ if receipt_file is not None:
         try:
             with st.spinner("영수증을 분석하고 있습니다."):
                 receipt = analyze_receipt_pdf(receipt_bytes, receipt_file.name)
+                receipt_business_digits = normalize_business_number(receipt.business_number)
                 receipt_status = (
-                    lookup_business_status(receipt.business_number).to_dict()
-                    if receipt.business_number
+                    lookup_business_status(receipt_business_digits).to_dict()
+                    if len(receipt_business_digits) == 10
                     else {}
                 )
                 receipt_total, receipt_supply, receipt_vat, amount_warning = amount_values_for_form(receipt)
@@ -364,8 +372,16 @@ if receipt_file is not None:
                 st.session_state["amount_total"] = receipt_total
                 st.session_state["amount_supply"] = receipt_supply
                 st.session_state["amount_vat"] = receipt_vat
+                st.session_state["receipt_business_number"] = (
+                    format_business_number(receipt_business_digits)
+                    if len(receipt_business_digits) == 10
+                    else receipt_business_digits
+                )
                 st.session_state["_receipt_result"] = receipt.model_dump()
                 st.session_state["_receipt_status"] = receipt_status
+                st.session_state["_receipt_business_number_queried"] = (
+                    receipt_business_digits if receipt_status else ""
+                )
                 st.session_state["_receipt_amount_warning"] = amount_warning
                 st.session_state["_receipt_processed_hash"] = receipt_hash
                 st.session_state.pop("_receipt_analysis_error", None)
@@ -381,7 +397,6 @@ if isinstance(receipt_result, dict):
     missing_fields = []
     for field_key, field_label in (
         ("merchant_name", "카드 사용처(상호명)"),
-        ("business_number", "사업자등록번호"),
         ("payment_date", "결제일자"),
         ("payment_time", "결제시간"),
         ("total_amount", "총액"),
@@ -392,26 +407,59 @@ if isinstance(receipt_result, dict):
         if value is None or (isinstance(value, str) and not value.strip()):
             missing_fields.append(field_label)
 
+    current_business_number = str(st.session_state.get("receipt_business_number") or "").strip()
+    if len(normalize_business_number(current_business_number)) != 10:
+        missing_fields.append("사업자등록번호")
+
     st.success("영수증 분석을 완료했습니다. 인식되거나 계산 가능한 항목을 자동 반영했습니다.")
     if missing_fields:
         st.warning(
-            "OCR에서 인식하지 못한 항목: "
+            "OCR에서 인식하지 못했거나 확인이 필요한 항목: "
             + ", ".join(missing_fields)
-            + " — 필요한 값은 아래 회의 기본정보에서 직접 입력해 주세요."
+            + " — 필요한 값은 직접 입력해 주세요."
         )
 
     merchant_name = str(receipt_result.get("merchant_name") or "확인 필요")
-    business_number = format_business_number(receipt_result.get("business_number"))
     payment_date_text = str(receipt_result.get("payment_date") or "확인 필요")
     payment_time_text = str(receipt_result.get("payment_time") or "확인 필요")
+
+    number_col, lookup_col = st.columns([3, 1])
+    with number_col:
+        st.text_input(
+            "사업자등록번호",
+            key="receipt_business_number",
+            placeholder="예: 123-45-67890",
+            on_change=_receipt_business_number_changed,
+            help="OCR 결과가 잘못되었거나 비어 있으면 직접 수정한 뒤 조회하세요.",
+        )
+    with lookup_col:
+        st.write("")
+        st.write("")
+        lookup_clicked = st.button(
+            "사업자 조회",
+            key="receipt_business_lookup",
+            use_container_width=True,
+        )
+
+    if lookup_clicked:
+        lookup_digits = normalize_business_number(st.session_state.get("receipt_business_number"))
+        if len(lookup_digits) != 10:
+            st.warning("사업자등록번호 10자리를 확인해 주세요.")
+        else:
+            with st.spinner("사업자 정보를 조회하고 있습니다."):
+                st.session_state["_receipt_status"] = lookup_business_status(lookup_digits).to_dict()
+                st.session_state["_receipt_business_number_queried"] = lookup_digits
+                receipt_result["business_number"] = lookup_digits
+                st.session_state["_receipt_result"] = receipt_result
+
     status = st.session_state.get("_receipt_status") or {}
+    queried_number = str(st.session_state.get("_receipt_business_number_queried") or "")
+    current_digits = normalize_business_number(st.session_state.get("receipt_business_number"))
 
     summary_parts = [f"실제 거래처: {merchant_name}"]
-    if business_number:
-        summary_parts.append(f"사업자등록번호: {business_number}")
-    if status.get("business_status"):
+    if status.get("business_status") and queried_number == current_digits:
         summary_parts.append(f"상태: {status['business_status']}")
-    if status.get("tax_type"):
+    if status.get("tax_type") and queried_number == current_digits:
         summary_parts.append(f"과세유형: {status['tax_type']}")
     st.caption(" · ".join(summary_parts))
     st.caption(f"결제일시: {payment_date_text} {payment_time_text}")
