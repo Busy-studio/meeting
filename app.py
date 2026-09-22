@@ -289,6 +289,8 @@ def _create_meeting(request: dict[str, object]) -> None:
     st.session_state.pop("saved_meeting_id", None)
     st.session_state.pop("export_bytes", None)
     st.session_state.pop("export_filename", None)
+    st.session_state.pop("export_pdf_bytes", None)
+    st.session_state.pop("export_pdf_filename", None)
 
 
 def _run_pending_generation() -> None:
@@ -404,6 +406,8 @@ if receipt_file is not None:
                 st.session_state["_receipt_amount_warning"] = amount_warning
                 st.session_state["_receipt_processed_hash"] = receipt_hash
                 st.session_state.pop("_receipt_analysis_error", None)
+                st.session_state.pop("export_pdf_bytes", None)
+                st.session_state.pop("export_pdf_filename", None)
         except Exception as exc:
             st.session_state["_receipt_analysis_error"] = str(exc)
 
@@ -456,6 +460,8 @@ else:
         "_receipt_amount_warning",
         "_receipt_processed_hash",
         "_receipt_analysis_error",
+        "export_pdf_bytes",
+        "export_pdf_filename",
     ):
         st.session_state.pop(key, None)
 
