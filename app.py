@@ -3,8 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
-import io
-import zipfile
 import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -16,6 +14,7 @@ from streamlit_cookies_controller import CookieController
 
 from src.db import load_businesses, load_meetings, load_participant_links, save_business, save_final_meeting
 from src.exporter import build_meeting_workbook, compose_content_block, export_filename
+from src.final_download import build_final_download
 from src.pdf_exporter import build_combined_meeting_pdf, tax_type_label
 from src.generator import extract_participant_identities, generate_meeting
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
@@ -148,14 +147,6 @@ def _save_final_download(payload: dict[str, object]) -> None:
     except Exception as exc:
         st.session_state["_final_save_error"] = str(exc)
         st.session_state.pop("_final_save_success", None)
-
-def _build_final_zip(workbook: bytes, workbook_name: str, pdf: bytes, pdf_name: str) -> bytes:
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        archive.writestr(workbook_name, workbook)
-        archive.writestr(pdf_name, pdf)
-    return output.getvalue()
-
 
 if "cookie_controller" not in st.session_state:
     st.session_state["cookie_controller"] = CookieController(key="meeting_generator_cookies")
@@ -942,16 +933,15 @@ if "result" in st.session_state:
                     f"{allowed_total:,}원 / 소요금액 {amount_total:,}원"
                 )
         else:
-            excel_col, pdf_col = st.columns(2)
-            pdf_bytes = None
-            pdf_name = ""
-            with pdf_col:
-                uploaded_receipt = st.session_state.get("_receipt_original_bytes")
-                has_receipt = isinstance(uploaded_receipt, (bytes, bytearray)) and bool(uploaded_receipt)
-                receipt_processing = st.session_state.get("_receipt_future")
-                if has_receipt and isinstance(receipt_processing, Future) and not receipt_processing.done():
-                    st.info("영수증 분석이 끝나면 통합 PDF를 준비합니다.")
-                else:
+            uploaded_receipt = st.session_state.get("_receipt_original_bytes")
+            has_receipt = isinstance(uploaded_receipt, (bytes, bytearray)) and bool(uploaded_receipt)
+            receipt_processing = st.session_state.get("_receipt_future")
+
+            if has_receipt and isinstance(receipt_processing, Future) and not receipt_processing.done():
+                st.info("영수증 분석이 끝나면 최종 회의록 ZIP을 준비합니다.")
+            else:
+                combined_pdf = None
+                if has_receipt:
                     current_digits = normalize_business_number(
                         st.session_state.get("receipt_business_number")
                     )
@@ -964,77 +954,56 @@ if "result" in st.session_state:
                         else {}
                     )
                     tax_label = tax_type_label(verified_status)
-                    if has_receipt and tax_label.startswith("미확인"):
+                    if tax_label.startswith("미확인"):
                         st.caption(
                             "사업자 과세유형을 확인하지 못해 영수증 하단에 '미확인'으로 표시합니다. "
                             "필요하면 사업자등록번호를 수정하고 다시 조회하세요."
                         )
 
-                    receipt_for_pdf = bytes(uploaded_receipt) if has_receipt else None
-                    pdf_name = file_name.rsplit(".", 1)[0] + (
-                        "_영수증포함.pdf" if has_receipt else ".pdf"
-                    )
+                    receipt_for_pdf = bytes(uploaded_receipt)
                     pdf_key = hashlib.sha256(
-                        b"a4-print-area-v2\0" + workbook_bytes
-                        + (receipt_for_pdf or b"")
+                        b"a4-print-area-v2\0" + workbook_bytes + receipt_for_pdf
                         + tax_label.encode("utf-8")
                     ).hexdigest()
                     cached_pdf = st.session_state.get("_combined_pdf_cache") or {}
                     try:
                         if cached_pdf.get("key") == pdf_key:
-                            pdf_bytes = cached_pdf["bytes"]
+                            combined_pdf = cached_pdf["bytes"]
                         else:
                             with st.spinner("최종 PDF를 준비하고 있습니다."):
-                                pdf_bytes = build_combined_meeting_pdf(
+                                combined_pdf = build_combined_meeting_pdf(
                                     workbook_bytes,
                                     receipt_pdf=receipt_for_pdf,
                                     tax_type=tax_label,
                                 )
                             st.session_state["_combined_pdf_cache"] = {
                                 "key": pdf_key,
-                                "bytes": pdf_bytes,
+                                "bytes": combined_pdf,
                             }
-                        st.download_button(
-                            "최종 회의록 PDF 다운로드",
-                            data=pdf_bytes,
-                            file_name=pdf_name,
-                            mime="application/pdf",
-                            type="secondary",
-                            key="final_combined_pdf_download",
-                            on_click=_save_final_download,
-                            args=(payload,),
-                            use_container_width=True,
-                        )
                     except Exception as pdf_exc:
-                        st.warning(
-                            "PDF를 준비하지 못했습니다. Excel 다운로드는 계속 사용할 수 있습니다. "
-                            + str(pdf_exc)
-                        )
+                        # Do not silently deliver Excel only when a receipt was attached.
+                        st.error("증빙 PDF를 준비하지 못해 ZIP을 생성할 수 없습니다. " + str(pdf_exc))
 
-            with excel_col:
-                if pdf_bytes:
+                if not has_receipt or combined_pdf:
+                    download = build_final_download(
+                        workbook_bytes,
+                        file_name,
+                        receipt_attached=has_receipt,
+                        combined_pdf=combined_pdf,
+                    )
                     st.download_button(
-                        "최종 회의록 생성 (ZIP)",
-                        data=_build_final_zip(workbook_bytes, file_name, pdf_bytes, pdf_name),
-                        file_name=file_name.rsplit(".", 1)[0] + ".zip",
-                        mime="application/zip",
+                        "최종 회의록 생성",
+                        data=download.data,
+                        file_name=download.filename,
+                        mime=download.mime,
                         type="primary",
-                        key="final_zip_generate",
+                        key="final_meeting_download",
                         on_click=_save_final_download,
                         args=(payload,),
                         use_container_width=True,
                     )
-                st.download_button(
-                    "Excel만 다운로드",
-                    data=workbook_bytes,
-                    file_name=file_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="final_excel_generate",
-                    on_click=_save_final_download,
-                    args=(payload,),
-                    use_container_width=True,
-                )
-            if pdf_bytes:
-                st.caption("ZIP 파일에 Excel과 PDF가 함께 들어 있습니다.")
+                    if has_receipt:
+                        st.caption("ZIP 파일에 회의록 Excel과 영수증이 포함된 통합 PDF가 들어 있습니다.")
+
     except Exception as exc:
         st.error(str(exc))
