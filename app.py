@@ -15,10 +15,18 @@ from src.db import load_businesses, load_meetings, load_participant_links, save_
 from src.exporter import build_meeting_workbook, compose_content_block, export_filename
 from src.generator import generate_meeting
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
+from src.receipt import (
+    amount_values_for_form,
+    analyze_receipt_pdf,
+    format_business_number,
+    lookup_business_status,
+    meeting_window_from_payment_time,
+    parse_payment_date,
+)
 from src.ui import business_from_state, render_business_form
 
 
-st.set_page_config(page_title="회의 뭐했니? v1.1", page_icon="📝", layout="centered")
+st.set_page_config(page_title="회의 뭐했니? v1.2", page_icon="📝", layout="centered")
 
 st.markdown(
     """
@@ -33,7 +41,7 @@ textarea {line-height:1.65 !important;}
     unsafe_allow_html=True,
 )
 
-st.title("회의 뭐했니? v1.1")
+st.title("회의 뭐했니? v1.2")
 st.caption("더 이상 사다리타기가 두렵지 않습니다.")
 
 AUTH_COOKIE_NAME = "meeting_generator_auth_v1"
@@ -50,6 +58,22 @@ def _recalculate_amount_breakdown() -> None:
     vat = total - supply
     st.session_state["amount_supply"] = supply
     st.session_state["amount_vat"] = vat
+
+
+def _recalculate_vat_from_supply() -> None:
+    total = max(0, int(st.session_state.get("amount_total", 0) or 0))
+    supply = max(0, int(st.session_state.get("amount_supply", 0) or 0))
+    supply = min(supply, total)
+    st.session_state["amount_supply"] = supply
+    st.session_state["amount_vat"] = total - supply
+
+
+def _recalculate_supply_from_vat() -> None:
+    total = max(0, int(st.session_state.get("amount_total", 0) or 0))
+    vat = max(0, int(st.session_state.get("amount_vat", 0) or 0))
+    vat = min(vat, total)
+    st.session_state["amount_vat"] = vat
+    st.session_state["amount_supply"] = total - vat
 
 
 def _compose_amount_raw() -> str:
@@ -288,9 +312,6 @@ except Exception as exc:
     st.error(f"Supabase를 불러오지 못했습니다. Streamlit Secrets의 SUPABASE_URL / SUPABASE_SECRET_KEY를 확인하세요.\n\n{exc}")
     st.stop()
 
-st.subheader("1. 사업 및 회의 기본정보")
-business = render_business_form(businesses, save_business)
-
 now_kr = datetime.now(ZoneInfo("Asia/Seoul"))
 if "meeting_date" not in st.session_state:
     st.session_state["meeting_date"] = now_kr.date()
@@ -302,6 +323,95 @@ st.session_state.setdefault("meeting_place_selector", "삼성산학협동관 303
 st.session_state.setdefault("meeting_place_custom", "")
 for key in ("amount_total", "amount_supply", "amount_vat"):
     st.session_state.setdefault(key, 0)
+
+st.subheader("1. 영수증 업로드 (선택사항)")
+st.caption("실제 사용한 카드 영수증 PDF를 올리면 결제정보와 실제 판매자 정보를 분석해 회의 기본정보에 자동으로 반영합니다.")
+receipt_file = st.file_uploader(
+    "영수증 PDF",
+    type=["pdf"],
+    key="receipt_pdf",
+    help="PDF 파일을 이 영역에 끌어다 놓거나 파일을 선택하세요.",
+)
+
+if receipt_file is not None:
+    receipt_bytes = receipt_file.getvalue()
+    receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
+    if receipt_hash != st.session_state.get("_receipt_processed_hash"):
+        try:
+            with st.spinner("영수증을 분석하고 있습니다."):
+                receipt = analyze_receipt_pdf(receipt_bytes, receipt_file.name)
+                receipt_status = (
+                    lookup_business_status(receipt.business_number).to_dict()
+                    if receipt.business_number
+                    else {}
+                )
+                receipt_total, receipt_supply, receipt_vat, amount_warning = amount_values_for_form(receipt)
+
+                receipt_date = parse_payment_date(receipt.payment_date)
+                if receipt_date is not None:
+                    st.session_state["meeting_date"] = receipt_date
+
+                receipt_time = meeting_window_from_payment_time(receipt.payment_time)
+                if receipt_time:
+                    st.session_state["meeting_time"] = receipt_time
+
+                if receipt.merchant_name:
+                    st.session_state["card_merchant"] = receipt.merchant_name
+
+                st.session_state["amount_total"] = receipt_total
+                st.session_state["amount_supply"] = receipt_supply
+                st.session_state["amount_vat"] = receipt_vat
+                st.session_state["_receipt_result"] = receipt.model_dump()
+                st.session_state["_receipt_status"] = receipt_status
+                st.session_state["_receipt_amount_warning"] = amount_warning
+                st.session_state["_receipt_processed_hash"] = receipt_hash
+                st.session_state.pop("_receipt_analysis_error", None)
+        except Exception as exc:
+            st.session_state["_receipt_analysis_error"] = str(exc)
+
+receipt_error = st.session_state.get("_receipt_analysis_error")
+if receipt_error:
+    st.error(receipt_error)
+
+receipt_result = st.session_state.get("_receipt_result")
+if isinstance(receipt_result, dict):
+    st.success("영수증 분석을 완료했습니다.")
+    merchant_name = str(receipt_result.get("merchant_name") or "확인 필요")
+    business_number = format_business_number(receipt_result.get("business_number"))
+    payment_date_text = str(receipt_result.get("payment_date") or "확인 필요")
+    payment_time_text = str(receipt_result.get("payment_time") or "확인 필요")
+    status = st.session_state.get("_receipt_status") or {}
+
+    summary_parts = [f"실제 거래처: {merchant_name}"]
+    if business_number:
+        summary_parts.append(f"사업자등록번호: {business_number}")
+    if status.get("business_status"):
+        summary_parts.append(f"상태: {status['business_status']}")
+    if status.get("tax_type"):
+        summary_parts.append(f"과세유형: {status['tax_type']}")
+    st.caption(" · ".join(summary_parts))
+    st.caption(f"결제일시: {payment_date_text} {payment_time_text}")
+
+    intermediary = str(receipt_result.get("payment_intermediary_name") or "").strip()
+    intermediary_no = format_business_number(receipt_result.get("payment_intermediary_business_number"))
+    if intermediary:
+        intermediary_text = intermediary
+        if intermediary_no:
+            intermediary_text += f" / {intermediary_no}"
+        st.caption(f"결제대행/플랫폼: {intermediary_text} (거래처 자동입력에서 제외)")
+
+    amount_warning = str(st.session_state.get("_receipt_amount_warning") or "").strip()
+    if amount_warning:
+        st.warning(amount_warning)
+
+    if status.get("error"):
+        if status.get("configured") is False:
+            st.info(status["error"])
+        else:
+            st.warning(status["error"])
+
+st.subheader("2. 사업 및 회의 기본정보")
+business = render_business_form(businesses, save_business)
 
 with st.expander("회의 기본정보", expanded=True):
     c1, c2 = st.columns(2)
@@ -338,7 +448,8 @@ with st.expander("회의 기본정보", expanded=True):
             min_value=0,
             step=1,
             key="amount_supply",
-            help="자동 계산값을 필요에 따라 직접 수정할 수 있습니다.",
+            on_change=_recalculate_vat_from_supply,
+            help="직접 수정하면 소요금액 합계에 맞춰 부가세액이 자동 조정됩니다.",
         )
     with amount_c3:
         st.number_input(
@@ -346,12 +457,13 @@ with st.expander("회의 기본정보", expanded=True):
             min_value=0,
             step=1,
             key="amount_vat",
-            help="자동 계산값을 필요에 따라 직접 수정할 수 있습니다.",
+            on_change=_recalculate_supply_from_vat,
+            help="직접 수정하면 소요금액 합계에 맞춰 공급가액이 자동 조정됩니다.",
         )
 
     st.text_input("카드 사용처", key="card_merchant")
 
-st.subheader("2. 회의내용 정보")
+st.subheader("3. 회의내용 정보")
 mode = st.radio(
     "생성 방식",
     ["카테고리만 선택하여 자동 생성", "키워드 또는 회의 목적 입력"],
