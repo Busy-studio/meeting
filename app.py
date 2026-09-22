@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import random
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_cookies_controller import CookieController
 
 from src.db import load_businesses, load_meetings, load_participant_links, save_business, save_final_meeting
@@ -146,6 +148,45 @@ def _save_final_download(payload: dict[str, object]) -> None:
     except Exception as exc:
         st.session_state["_final_save_error"] = str(exc)
         st.session_state.pop("_final_save_success", None)
+
+def _save_final_with_pdf(payload: dict[str, object], pdf_bytes: bytes | None, pdf_name: str) -> None:
+    # Capture the PDF paired with the Excel button, never a later cache value.
+    st.session_state.pop("_pending_pdf_download", None)
+    _save_final_download(payload)
+    if not st.session_state.get("_final_save_error") and pdf_bytes:
+        st.session_state["_pending_pdf_download"] = {
+            "bytes": pdf_bytes,
+            "filename": pdf_name,
+            "token": str(time.time_ns()),
+        }
+
+
+def _render_pending_pdf_download() -> None:
+    pending = st.session_state.pop("_pending_pdf_download", None)
+    if not pending:
+        return
+    data = json.dumps({
+        "data": base64.b64encode(pending["bytes"]).decode("ascii"),
+        "filename": pending["filename"],
+        "token": pending["token"],
+    }, ensure_ascii=True).replace("<", "\\u003c")
+    components.html(
+        """<script>
+const file = """ + data + """;
+const bytes = Uint8Array.from(atob(file.data), c => c.charCodeAt(0));
+const url = URL.createObjectURL(new Blob([bytes], {type: "application/pdf"}));
+const link = document.createElement("a");
+link.href = url;
+link.download = file.filename;
+document.body.appendChild(link);
+link.click();
+link.remove();
+setTimeout(() => URL.revokeObjectURL(url), 60000);
+</script>""",
+        height=0,
+        scrolling=False,
+    )
+
 
 if "cookie_controller" not in st.session_state:
     st.session_state["cookie_controller"] = CookieController(key="meeting_generator_cookies")
@@ -484,6 +525,9 @@ def _render_login_gate() -> None:
 if not _browser_is_authenticated():
     _render_login_gate()
     st.stop()
+
+
+_render_pending_pdf_download()
 
 
 try:
@@ -933,19 +977,8 @@ if "result" in st.session_state:
                 )
         else:
             excel_col, pdf_col = st.columns(2)
-            with excel_col:
-                st.download_button(
-                    "최종 회의록 생성 (Excel)",
-                    data=workbook_bytes,
-                    file_name=file_name,
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary",
-                    key="final_excel_generate",
-                    on_click=_save_final_download,
-                    args=(payload,),
-                    use_container_width=True,
-                )
-
+            pdf_bytes = None
+            pdf_name = ""
             with pdf_col:
                 uploaded_receipt = st.session_state.get("_receipt_original_bytes")
                 has_receipt = isinstance(uploaded_receipt, (bytes, bytearray)) and bool(uploaded_receipt)
@@ -1011,5 +1044,21 @@ if "result" in st.session_state:
                             "PDF를 준비하지 못했습니다. Excel 다운로드는 계속 사용할 수 있습니다. "
                             + str(pdf_exc)
                         )
+
+            with excel_col:
+                st.download_button(
+                    "최종 회의록 생성",
+                    data=workbook_bytes,
+                    file_name=file_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    key="final_excel_generate",
+                    on_click=_save_final_with_pdf,
+                    args=(payload, pdf_bytes, pdf_name),
+                    use_container_width=True,
+                )
+
+            if pdf_bytes:
+                st.caption("최종 회의록 생성 시 Excel에 이어 PDF도 자동 다운로드합니다. PDF가 내려오지 않으면 옆의 PDF 다운로드 버튼을 눌러 주세요.")
     except Exception as exc:
         st.error(str(exc))
