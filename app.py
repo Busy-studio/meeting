@@ -14,6 +14,7 @@ from streamlit_cookies_controller import CookieController
 
 from src.db import load_businesses, load_meetings, load_participant_links, save_business, save_final_meeting
 from src.exporter import build_meeting_workbook, compose_content_block, export_filename
+from src.pdf_exporter import build_combined_meeting_pdf, tax_type_label
 from src.generator import extract_participant_identities, generate_meeting
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
 from src.receipt import (
@@ -931,16 +932,84 @@ if "result" in st.session_state:
                     f"{allowed_total:,}원 / 소요금액 {amount_total:,}원"
                 )
         else:
-            st.download_button(
-                "최종 회의록 생성",
-                data=workbook_bytes,
-                file_name=file_name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                type="primary",
-                key="final_excel_generate",
-                on_click=_save_final_download,
-                args=(payload,),
-                use_container_width=True,
-            )
+            excel_col, pdf_col = st.columns(2)
+            with excel_col:
+                st.download_button(
+                    "최종 회의록 생성 (Excel)",
+                    data=workbook_bytes,
+                    file_name=file_name,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    type="primary",
+                    key="final_excel_generate",
+                    on_click=_save_final_download,
+                    args=(payload,),
+                    use_container_width=True,
+                )
+
+            with pdf_col:
+                uploaded_receipt = st.session_state.get("_receipt_original_bytes")
+                has_receipt = isinstance(uploaded_receipt, (bytes, bytearray)) and bool(uploaded_receipt)
+                receipt_processing = st.session_state.get("_receipt_future")
+                if has_receipt and isinstance(receipt_processing, Future) and not receipt_processing.done():
+                    st.info("영수증 분석이 끝나면 통합 PDF를 준비합니다.")
+                else:
+                    current_digits = normalize_business_number(
+                        st.session_state.get("receipt_business_number")
+                    )
+                    queried_digits = str(
+                        st.session_state.get("_receipt_business_number_queried") or ""
+                    )
+                    verified_status = (
+                        st.session_state.get("_receipt_status") or {}
+                        if current_digits and current_digits == queried_digits
+                        else {}
+                    )
+                    tax_label = tax_type_label(verified_status)
+                    if has_receipt and tax_label.startswith("미확인"):
+                        st.caption(
+                            "사업자 과세유형을 확인하지 못해 영수증 하단에 '미확인'으로 표시합니다. "
+                            "필요하면 사업자등록번호를 수정하고 다시 조회하세요."
+                        )
+
+                    receipt_for_pdf = bytes(uploaded_receipt) if has_receipt else None
+                    pdf_name = file_name.rsplit(".", 1)[0] + (
+                        "_영수증포함.pdf" if has_receipt else ".pdf"
+                    )
+                    pdf_key = hashlib.sha256(
+                        workbook_bytes
+                        + (receipt_for_pdf or b"")
+                        + tax_label.encode("utf-8")
+                    ).hexdigest()
+                    cached_pdf = st.session_state.get("_combined_pdf_cache") or {}
+                    try:
+                        if cached_pdf.get("key") == pdf_key:
+                            pdf_bytes = cached_pdf["bytes"]
+                        else:
+                            with st.spinner("최종 PDF를 준비하고 있습니다."):
+                                pdf_bytes = build_combined_meeting_pdf(
+                                    workbook_bytes,
+                                    receipt_pdf=receipt_for_pdf,
+                                    tax_type=tax_label,
+                                )
+                            st.session_state["_combined_pdf_cache"] = {
+                                "key": pdf_key,
+                                "bytes": pdf_bytes,
+                            }
+                        st.download_button(
+                            "최종 회의록 PDF 다운로드",
+                            data=pdf_bytes,
+                            file_name=pdf_name,
+                            mime="application/pdf",
+                            type="secondary",
+                            key="final_combined_pdf_download",
+                            on_click=_save_final_download,
+                            args=(payload,),
+                            use_container_width=True,
+                        )
+                    except Exception as pdf_exc:
+                        st.warning(
+                            "PDF를 준비하지 못했습니다. Excel 다운로드는 계속 사용할 수 있습니다. "
+                            + str(pdf_exc)
+                        )
     except Exception as exc:
         st.error(str(exc))
