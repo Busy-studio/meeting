@@ -107,16 +107,16 @@ def _receipt_prompt() -> str:
 - 읽을 수 없는 값은 임의로 만들지 말고 null로 둔다.
 
 {
-  "payment_date": "YYYY-MM-DD 또는 null",
-  "payment_time": "HH:MM:SS 또는 null",
-  "merchant_name": "실제 판매자/이용상점 상호 또는 null",
-  "business_number": "실제 판매자 사업자등록번호 숫자 10자리 또는 null",
-  "total_amount": 0,
-  "supply_amount": 0,
-  "vat_amount": 0,
-  "tax_exempt_amount": 0,
-  "payment_intermediary_name": "결제대행/플랫폼 사업자명 또는 null",
-  "payment_intermediary_business_number": "결제대행/플랫폼 사업자번호 또는 null"
+  "payment_date": null,
+  "payment_time": null,
+  "merchant_name": null,
+  "business_number": null,
+  "total_amount": null,
+  "supply_amount": null,
+  "vat_amount": null,
+  "tax_exempt_amount": null,
+  "payment_intermediary_name": null,
+  "payment_intermediary_business_number": null
 }
 """.strip()
 
