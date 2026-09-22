@@ -3,17 +3,20 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
 import random
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
 import streamlit as st
+import streamlit.components.v1 as components
 from streamlit_cookies_controller import CookieController
 
 from src.db import load_businesses, load_meetings, load_participant_links, save_business, save_final_meeting
 from src.exporter import build_meeting_workbook, compose_content_block, export_filename
 from src.generator import generate_meeting
+from src.pdf_exporter import build_meeting_receipt_pdf, pdf_export_filename
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
 from src.receipt import (
     amount_values_for_form,
@@ -74,6 +77,37 @@ def _recalculate_supply_from_vat() -> None:
     vat = min(vat, total)
     st.session_state["amount_vat"] = vat
     st.session_state["amount_supply"] = total - vat
+
+
+def _trigger_auto_downloads(files: list[tuple[str, bytes, str]]) -> None:
+    payload = [
+        {
+            "filename": filename,
+            "mime": mime,
+            "data": base64.b64encode(content).decode("ascii"),
+        }
+        for filename, content, mime in files
+    ]
+    script_data = json.dumps(payload, ensure_ascii=False)
+    components.html(
+        f"""
+<script>
+const files = {script_data};
+files.forEach((file, index) => {{
+  window.setTimeout(() => {{
+    const link = document.createElement("a");
+    link.href = "data:" + file.mime + ";base64," + file.data;
+    link.download = file.filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }}, index * 500);
+}});
+</script>
+""",
+        height=0,
+        scrolling=False,
+    )
 
 
 def _compose_amount_raw() -> str:
@@ -201,6 +235,8 @@ def _clear_result() -> None:
     st.session_state.pop("saved_meeting_id", None)
     st.session_state.pop("export_bytes", None)
     st.session_state.pop("export_filename", None)
+    st.session_state.pop("export_pdf_bytes", None)
+    st.session_state.pop("export_pdf_filename", None)
     for key in EDIT_KEYS:
         st.session_state.pop(key, None)
 
@@ -253,6 +289,8 @@ def _create_meeting(request: dict[str, object]) -> None:
     st.session_state.pop("saved_meeting_id", None)
     st.session_state.pop("export_bytes", None)
     st.session_state.pop("export_filename", None)
+    st.session_state.pop("export_pdf_bytes", None)
+    st.session_state.pop("export_pdf_filename", None)
 
 
 def _run_pending_generation() -> None:
@@ -335,6 +373,8 @@ receipt_file = st.file_uploader(
 
 if receipt_file is not None:
     receipt_bytes = receipt_file.getvalue()
+    st.session_state["_receipt_file_bytes"] = receipt_bytes
+    st.session_state["_receipt_file_name"] = receipt_file.name
     receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
     if receipt_hash != st.session_state.get("_receipt_processed_hash"):
         st.session_state.pop("_receipt_result", None)
@@ -369,6 +409,8 @@ if receipt_file is not None:
                 st.session_state["_receipt_amount_warning"] = amount_warning
                 st.session_state["_receipt_processed_hash"] = receipt_hash
                 st.session_state.pop("_receipt_analysis_error", None)
+                st.session_state.pop("export_pdf_bytes", None)
+                st.session_state.pop("export_pdf_filename", None)
         except Exception as exc:
             st.session_state["_receipt_analysis_error"] = str(exc)
 
@@ -412,6 +454,20 @@ if isinstance(receipt_result, dict):
             st.info(status["error"])
         else:
             st.warning(status["error"])
+
+if receipt_file is None:
+    for key in (
+        "_receipt_file_bytes",
+        "_receipt_file_name",
+        "_receipt_result",
+        "_receipt_status",
+        "_receipt_amount_warning",
+        "_receipt_processed_hash",
+        "_receipt_analysis_error",
+        "export_pdf_bytes",
+        "export_pdf_filename",
+    ):
+        st.session_state.pop(key, None)
 
 st.subheader("2. 사업 및 회의 기본정보")
 business = render_business_form(businesses, save_business)
@@ -582,16 +638,92 @@ if "result" in st.session_state:
             business["name"], meeting_date, form["author_name"]
         )
 
-        st.download_button(
+        final_clicked = st.button(
             "최종 회의록 생성",
-            data=workbook_bytes,
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             type="primary",
             key="final_excel_generate",
-            on_click=_save_final_download,
-            args=(payload,),
             use_container_width=True,
         )
+        if final_clicked:
+            _save_final_download(payload)
+            if not st.session_state.get("_final_save_error"):
+                st.session_state["export_bytes"] = workbook_bytes
+                st.session_state["export_filename"] = file_name
+                st.session_state.pop("export_pdf_bytes", None)
+                st.session_state.pop("export_pdf_filename", None)
+
+                auto_files = [
+                    (
+                        file_name,
+                        workbook_bytes,
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    )
+                ]
+
+                receipt_bytes = st.session_state.get("_receipt_file_bytes")
+                receipt_status = st.session_state.get("_receipt_status") or {}
+                pdf_error = ""
+                if isinstance(receipt_bytes, (bytes, bytearray)) and receipt_bytes:
+                    try:
+                        combined_pdf_bytes = build_meeting_receipt_pdf(
+                            workbook_bytes=workbook_bytes,
+                            receipt_bytes=bytes(receipt_bytes),
+                            tax_type=receipt_status.get("tax_type", ""),
+                        )
+                        combined_pdf_name = pdf_export_filename(file_name)
+                        st.session_state["export_pdf_bytes"] = combined_pdf_bytes
+                        st.session_state["export_pdf_filename"] = combined_pdf_name
+                        auto_files.append(
+                            (
+                                combined_pdf_name,
+                                combined_pdf_bytes,
+                                "application/pdf",
+                            )
+                        )
+                    except Exception as exc:
+                        pdf_error = str(exc)
+
+                if pdf_error:
+                    st.error(f"영수증 포함 PDF 생성에 실패했습니다: {pdf_error}")
+                    st.success("최종본을 저장했습니다. Excel 다운로드를 시작합니다.")
+                elif len(auto_files) == 2:
+                    st.success("최종본을 저장했습니다. Excel과 영수증 포함 PDF 다운로드를 시작합니다.")
+                else:
+                    st.success("최종본을 저장했습니다. Excel 다운로드를 시작합니다.")
+
+                _trigger_auto_downloads(auto_files)
+
+        saved_xlsx = st.session_state.get("export_bytes")
+        saved_xlsx_name = st.session_state.get("export_filename")
+        if isinstance(saved_xlsx, (bytes, bytearray)) and saved_xlsx_name:
+            saved_pdf = st.session_state.get("export_pdf_bytes")
+            saved_pdf_name = st.session_state.get("export_pdf_filename")
+            if isinstance(saved_pdf, (bytes, bytearray)) and saved_pdf_name:
+                dl1, dl2 = st.columns(2)
+                with dl1:
+                    st.download_button(
+                        "Excel 다시 다운로드",
+                        data=bytes(saved_xlsx),
+                        file_name=str(saved_xlsx_name),
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                    )
+                with dl2:
+                    st.download_button(
+                        "영수증 포함 PDF 다시 다운로드",
+                        data=bytes(saved_pdf),
+                        file_name=str(saved_pdf_name),
+                        mime="application/pdf",
+                        use_container_width=True,
+                    )
+                st.caption("브라우저에서 여러 파일 자동 다운로드를 차단한 경우 위 버튼으로 각각 받을 수 있습니다.")
+            else:
+                st.download_button(
+                    "Excel 다시 다운로드",
+                    data=bytes(saved_xlsx),
+                    file_name=str(saved_xlsx_name),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                )
     except Exception as exc:
         st.error(str(exc))
