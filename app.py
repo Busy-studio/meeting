@@ -47,6 +47,7 @@ st.caption("더 이상 사다리타기가 두렵지 않습니다.")
 
 AUTH_COOKIE_NAME = "meeting_generator_auth_v1"
 EDIT_KEYS = ["edit_purpose", "edit_participants", "edit_meeting_content", "edit_future_plan"]
+MEETING_COST_PER_PERSON = 50_000
 
 
 def _recalculate_amount_breakdown() -> None:
@@ -90,6 +91,17 @@ def _receipt_business_number_changed() -> None:
     # 사용자가 OCR 결과를 수정하면 이전 국세청 조회결과는 더 이상 유효하지 않다.
     st.session_state["_receipt_status"] = {}
     st.session_state["_receipt_business_number_queried"] = ""
+
+
+def _participant_count(raw: str) -> int:
+    """Count unique people recognized from the final edited participant text."""
+    items = parse_participants_for_save(raw)
+    names = {
+        str(item.get("normalized_name") or item.get("name") or "").strip()
+        for item in items
+        if str(item.get("normalized_name") or item.get("name") or "").strip()
+    }
+    return len(names)
 
 
 def _current_meeting_place() -> str:
@@ -631,6 +643,12 @@ if "result" in st.session_state:
             "future_plan": future_plan,
         }
 
+        participant_items = parse_participants_for_save(participants)
+        participant_count = _participant_count(participants)
+        amount_total = max(0, int(st.session_state.get("amount_total", 0) or 0))
+        allowed_total = participant_count * MEETING_COST_PER_PERSON
+        over_budget = participant_count > 0 and amount_total > allowed_total
+
         workbook_bytes = build_meeting_workbook(form)
         content_block = compose_content_block(meeting_content, future_plan)
         payload = {
@@ -647,23 +665,36 @@ if "result" in st.session_state:
             "meeting_content": meeting_content,
             "future_plan": future_plan,
             "content_block": content_block,
-            "participant_items": parse_participants_for_save(participants),
+            "participant_items": participant_items,
             "generated_original": st.session_state["result"].get("generated_original", {}),
         }
         file_name = export_filename(
             business["name"], meeting_date, form["author_name"]
         )
 
-        st.download_button(
-            "최종 회의록 생성",
-            data=workbook_bytes,
-            file_name=file_name,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            type="primary",
-            key="final_excel_generate",
-            on_click=_save_final_download,
-            args=(payload,),
-            use_container_width=True,
-        )
+        if over_budget:
+            if st.button(
+                "최종 회의록 생성",
+                type="primary",
+                key="final_excel_generate_over_budget",
+                use_container_width=True,
+            ):
+                st.error(
+                    "총예산보다 소요금액이 큽니다. "
+                    f"참석자 {participant_count}명 × {MEETING_COST_PER_PERSON:,}원 = "
+                    f"{allowed_total:,}원 / 소요금액 {amount_total:,}원"
+                )
+        else:
+            st.download_button(
+                "최종 회의록 생성",
+                data=workbook_bytes,
+                file_name=file_name,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                type="primary",
+                key="final_excel_generate",
+                on_click=_save_final_download,
+                args=(payload,),
+                use_container_width=True,
+            )
     except Exception as exc:
         st.error(str(exc))
