@@ -31,7 +31,7 @@ def _rpc(function_name: str, payload: dict[str, Any] | None = None) -> Any:
         "apikey": key,
         "Content-Type": "application/json",
         "Accept": "application/json",
-        "User-Agent": "pnu-meeting-streamlit/1.1",
+        "User-Agent": "pnu-meeting-streamlit/1.2",
     }
     # Legacy service_role JWTs need an Authorization header. Modern sb_secret keys do not.
     if key.startswith("eyJ"):
