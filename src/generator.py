@@ -163,7 +163,7 @@ def extract_participant_identities(raw: str) -> ParticipantIdentityExtraction:
 {{"people":[
   {{"name":"김철수","organization":"부산대학교","title":"교수"}},
   {{"name":"이영희","organization":"","title":""}}
-]}}
+],"ambiguous_names":[]}}
 """.strip()
 
     response = client.responses.create(
