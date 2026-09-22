@@ -518,6 +518,8 @@ receipt_file = st.file_uploader(
 if receipt_file is not None:
     receipt_bytes = receipt_file.getvalue()
     receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
+    st.session_state["_receipt_original_bytes"] = receipt_bytes
+    st.session_state["_receipt_original_name"] = receipt_file.name
     st.session_state["_receipt_active_hash"] = receipt_hash
 
     receipt_future = st.session_state.get("_receipt_future")
@@ -563,6 +565,20 @@ if receipt_file is not None:
         st.rerun()
 else:
     st.session_state["_receipt_active_hash"] = ""
+    st.session_state.pop("_receipt_original_bytes", None)
+    st.session_state.pop("_receipt_original_name", None)
+
+receipt_original_bytes = st.session_state.get("_receipt_original_bytes")
+receipt_original_name = str(st.session_state.get("_receipt_original_name") or "receipt.pdf")
+if isinstance(receipt_original_bytes, (bytes, bytearray)) and receipt_original_bytes:
+    st.download_button(
+        "영수증 PDF 다운로드",
+        data=bytes(receipt_original_bytes),
+        file_name=receipt_original_name,
+        mime="application/pdf",
+        key="receipt_pdf_download",
+        use_container_width=True,
+    )
 
 receipt_future = st.session_state.get("_receipt_future")
 if isinstance(receipt_future, Future) and not receipt_future.done():
