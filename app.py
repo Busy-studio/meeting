@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import random
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
@@ -48,6 +49,11 @@ st.caption("더 이상 사다리타기가 두렵지 않습니다.")
 AUTH_COOKIE_NAME = "meeting_generator_auth_v1"
 EDIT_KEYS = ["edit_purpose", "edit_participants", "edit_meeting_content", "edit_future_plan"]
 MEETING_COST_PER_PERSON = 50_000
+
+
+@st.cache_resource
+def _background_executor() -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(max_workers=4, thread_name_prefix="meeting-v12")
 
 
 def _recalculate_amount_breakdown() -> None:
@@ -237,6 +243,11 @@ def _clear_result() -> None:
     st.session_state.pop("export_bytes", None)
     st.session_state.pop("export_filename", None)
     st.session_state.pop("_participant_identity_cache", None)
+    future = st.session_state.pop("_meeting_future", None)
+    if isinstance(future, Future):
+        future.cancel()
+    st.session_state.pop("_meeting_job_meta", None)
+    st.session_state.pop("_meeting_generation_error", None)
     for key in EDIT_KEYS:
         st.session_state.pop(key, None)
 
@@ -248,11 +259,10 @@ def _set_edit_result(purpose: str, participants: str, meeting_content: str, futu
     st.session_state["edit_future_plan"] = future_plan
 
 
-def _create_meeting(request: dict[str, object]) -> None:
+def _prepare_meeting_generation(request: dict[str, object]):
     mode = str(request["mode"])
     category = str(request.get("category") or "")
     user_input = str(request.get("user_input") or "")
-    keep_exact = bool(request.get("keep_exact", False))
     business_name = str(request.get("business_name") or "")
 
     meetings = load_meetings()
@@ -272,12 +282,113 @@ def _create_meeting(request: dict[str, object]) -> None:
     participants = select_participants(similar, participant_links, max_people=5)
     if not participants:
         raise RuntimeError("조건에 맞는 외부 참석자를 DB에서 찾지 못했습니다. 다른 카테고리나 키워드를 사용하세요.")
+    return similar, participants
 
-    generated = generate_meeting(category or "사용자 입력 기반", user_input, similar, keep_exact, business_name)
-    purpose = generated.meeting_purpose
-    participant_text = ", ".join(participants)
-    meeting_content = "\n".join(f"- {x}" for x in generated.meeting_content)
-    future_plan = "\n".join(f"- {x}" for x in generated.future_plan)
+
+def _meeting_generation_job(
+    category: str,
+    user_input: str,
+    similar,
+    keep_exact: bool,
+    business_name: str,
+    api_key: str,
+    model: str,
+) -> dict[str, object]:
+    generated = generate_meeting(
+        category or "사용자 입력 기반",
+        user_input,
+        similar,
+        keep_exact,
+        business_name,
+        api_key=api_key,
+        model=model,
+    )
+    return generated.model_dump()
+
+
+def _receipt_analysis_job(
+    file_bytes: bytes,
+    filename: str,
+    api_key: str,
+    model: str,
+    nts_service_key: str,
+) -> dict[str, object]:
+    receipt = analyze_receipt_pdf(
+        file_bytes,
+        filename,
+        api_key=api_key,
+        model=model,
+    )
+    business_digits = normalize_business_number(receipt.business_number)
+    status = (
+        lookup_business_status(
+            business_digits,
+            service_key=nts_service_key,
+        ).to_dict()
+        if len(business_digits) == 10
+        else {}
+    )
+    total, supply, vat, amount_warning = amount_values_for_form(receipt)
+    return {
+        "receipt": receipt.model_dump(),
+        "business_digits": business_digits,
+        "status": status,
+        "amount_total": total,
+        "amount_supply": supply,
+        "amount_vat": vat,
+        "amount_warning": amount_warning,
+    }
+
+
+def _apply_receipt_job_result(payload: dict[str, object], snapshot: dict[str, object]) -> None:
+    receipt = dict(payload.get("receipt") or {})
+    business_digits = str(payload.get("business_digits") or "")
+    status = dict(payload.get("status") or {})
+
+    receipt_date = parse_payment_date(receipt.get("payment_date"))
+    if receipt_date is not None and st.session_state.get("meeting_date") == snapshot.get("meeting_date"):
+        st.session_state["meeting_date"] = receipt_date
+
+    receipt_time = meeting_window_from_payment_time(receipt.get("payment_time"))
+    if receipt_time and st.session_state.get("meeting_time") == snapshot.get("meeting_time"):
+        st.session_state["meeting_time"] = receipt_time
+
+    merchant_name = str(receipt.get("merchant_name") or "").strip()
+    if merchant_name and st.session_state.get("card_merchant") == snapshot.get("card_merchant"):
+        st.session_state["card_merchant"] = merchant_name
+
+    amount_keys = ("amount_total", "amount_supply", "amount_vat")
+    if all(st.session_state.get(key) == snapshot.get(key) for key in amount_keys):
+        st.session_state["amount_total"] = int(payload.get("amount_total") or 0)
+        st.session_state["amount_supply"] = int(payload.get("amount_supply") or 0)
+        st.session_state["amount_vat"] = int(payload.get("amount_vat") or 0)
+
+    current_business_number = str(st.session_state.get("receipt_business_number") or "")
+    snapshot_business_number = str(snapshot.get("receipt_business_number") or "")
+    if current_business_number == snapshot_business_number:
+        st.session_state["receipt_business_number"] = (
+            format_business_number(business_digits)
+            if len(business_digits) == 10
+            else business_digits
+        )
+        st.session_state["_receipt_status"] = status
+        st.session_state["_receipt_business_number_queried"] = (
+            business_digits if status else ""
+        )
+    else:
+        st.session_state["_receipt_status"] = {}
+        st.session_state["_receipt_business_number_queried"] = ""
+
+    st.session_state["_receipt_result"] = receipt
+    st.session_state["_receipt_amount_warning"] = str(payload.get("amount_warning") or "")
+    st.session_state.pop("_receipt_analysis_error", None)
+
+
+def _apply_meeting_generation_result(payload: dict[str, object], meta: dict[str, object]) -> None:
+    purpose = str(payload.get("meeting_purpose") or "")
+    participant_text = str(meta.get("participant_text") or "")
+    meeting_content = "\n".join(f"- {x}" for x in (payload.get("meeting_content") or []))
+    future_plan = "\n".join(f"- {x}" for x in (payload.get("future_plan") or []))
     original = {
         "purpose": purpose,
         "participants": participant_text,
@@ -289,15 +400,47 @@ def _create_meeting(request: dict[str, object]) -> None:
     st.session_state.pop("saved_meeting_id", None)
     st.session_state.pop("export_bytes", None)
     st.session_state.pop("export_filename", None)
+    st.session_state.pop("_meeting_generation_error", None)
 
 
-def _run_pending_generation() -> None:
-    request = st.session_state.get("pending_generation")
-    if not request:
-        raise RuntimeError("생성 요청 정보가 없습니다. 다시 시도하세요.")
-    _create_meeting(request)
-    st.session_state.pop("pending_generation", None)
-    st.session_state.pop("generation_password", None)
+@st.fragment(run_every="1s")
+def _poll_background_jobs() -> None:
+    changed = False
+
+    receipt_future = st.session_state.get("_receipt_future")
+    if isinstance(receipt_future, Future) and receipt_future.done():
+        job_hash = str(st.session_state.get("_receipt_job_hash") or "")
+        snapshot = dict(st.session_state.get("_receipt_job_snapshot") or {})
+        try:
+            payload = receipt_future.result()
+            if job_hash and job_hash == str(st.session_state.get("_receipt_active_hash") or ""):
+                _apply_receipt_job_result(payload, snapshot)
+                st.session_state["_receipt_processed_hash"] = job_hash
+        except Exception as exc:
+            if job_hash == str(st.session_state.get("_receipt_active_hash") or ""):
+                st.session_state["_receipt_analysis_error"] = str(exc)
+                st.session_state["_receipt_processed_hash"] = job_hash
+        finally:
+            st.session_state.pop("_receipt_future", None)
+            st.session_state.pop("_receipt_job_hash", None)
+            st.session_state.pop("_receipt_job_snapshot", None)
+        changed = True
+
+    meeting_future = st.session_state.get("_meeting_future")
+    if isinstance(meeting_future, Future) and meeting_future.done():
+        meta = dict(st.session_state.get("_meeting_job_meta") or {})
+        try:
+            payload = meeting_future.result()
+            _apply_meeting_generation_result(payload, meta)
+        except Exception as exc:
+            st.session_state["_meeting_generation_error"] = str(exc)
+        finally:
+            st.session_state.pop("_meeting_future", None)
+            st.session_state.pop("_meeting_job_meta", None)
+        changed = True
+
+    if changed:
+        st.rerun()
 
 
 def _render_login_gate() -> None:
