@@ -16,6 +16,16 @@ class GeneratedMeeting(BaseModel):
     future_plan: list[str] = Field(min_length=3, max_length=3)
 
 
+class ParticipantIdentity(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    organization: str = Field(default="", max_length=200)
+    title: str = Field(default="", max_length=100)
+
+
+class ParticipantIdentityExtraction(BaseModel):
+    people: list[ParticipantIdentity] = Field(default_factory=list, max_length=100)
+
+
 def _secret(name: str, default: str | None = None) -> str:
     value = st.secrets.get(name, default)
     if value is None or str(value).strip() == "":
@@ -104,3 +114,85 @@ def generate_meeting(
     if keep_exact_purpose and user_input.strip():
         result.meeting_purpose = user_input.strip()
     return result
+
+
+def extract_participant_identities(raw: str) -> list[ParticipantIdentity]:
+    """Extract distinct explicitly written people from the final participant text.
+
+    Organization/title are optional. They are used only when the text itself
+    provides them, including to distinguish same-name people. The model must
+    not invent missing identity details.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return []
+
+    client = OpenAI(api_key=_secret("OPENAI_API_KEY"))
+    model = _secret("OPENAI_PARTICIPANT_MODEL", "gpt-5.6-luna")
+    prompt = f"""
+다음은 사용자가 최종 수정한 회의 참석자 명단이다.
+
+[참석자 명단]
+{text}
+
+명단에 명시된 서로 다른 사람을 추출해 JSON 하나만 출력한다.
+
+판별 규칙:
+- 사람 이름이 명시되어 있으면 소속이나 직급/직책이 없어도 1명으로 인정한다.
+- 이름만 단독으로 적힌 경우도 반드시 포함한다.
+- 기관명, 회사명, 학교명, 부서명, 직급, 직책, 역할명 자체는 사람으로 세지 않는다.
+- 기존 DB에 없는 새로운 이름도 명단에 명시되어 있으면 포함한다.
+- 한국어 이름뿐 아니라 영문 등 다른 표기의 사람 이름도 포함할 수 있다.
+- organization과 title은 원문에 명시된 경우에만 기록하고, 없으면 빈 문자열로 둔다.
+- 같은 이름이라도 서로 다른 소속이 명확히 적혀 있으면 서로 다른 사람으로 구분한다.
+- 같은 이름이라도 직급/직책이 명확히 다르고 문맥상 서로 다른 사람으로 적혀 있으면 서로 다른 사람으로 구분한다.
+- 같은 이름이 반복되었지만 소속·직급 등 구분 정보가 없으면 임의로 여러 명이라고 추측하지 말고 한 사람으로 처리한다.
+- 같은 사람의 이름이 여러 번 반복되면 한 번만 포함한다.
+- 문맥만으로 이름, 소속, 직급을 만들어내거나 보충하지 않는다.
+- 확실히 사람 이름이라고 판단하기 어려운 문자열은 제외한다.
+- name, organization, title은 가능한 한 원문 표기를 그대로 사용한다.
+
+출력 형식:
+{{"people":[
+  {{"name":"김철수","organization":"부산대학교","title":"교수"}},
+  {{"name":"이영희","organization":"","title":""}}
+]}}
+""".strip()
+
+    response = client.responses.create(
+        model=model,
+        instructions="회의 참석자 명단에서 명시된 서로 다른 사람만 보수적으로 식별하는 정보 추출기다.",
+        input=prompt,
+        reasoning={"effort": "low"},
+        prompt_cache_options={"mode": "explicit"},
+        store=False,
+    )
+    try:
+        result = ParticipantIdentityExtraction.model_validate(_extract_json(response.output_text))
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"참석자 판별 결과 형식 검증 실패: {exc}") from exc
+
+    # 이름은 반드시 원문에 실제로 등장해야 한다. 모델이 새 이름을 만든 경우 예산 판정에서 제외한다.
+    compact_source = re.sub(r"\s+", "", text).casefold()
+    verified: list[ParticipantIdentity] = []
+    seen: set[tuple[str, str, str]] = set()
+    for person in result.people:
+        name = person.name.strip()
+        organization = person.organization.strip()
+        title = person.title.strip()
+        if not name:
+            continue
+        if re.sub(r"\s+", "", name).casefold() not in compact_source:
+            continue
+        key = (
+            re.sub(r"\s+", "", name).casefold(),
+            re.sub(r"\s+", "", organization).casefold(),
+            re.sub(r"\s+", "", title).casefold(),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        verified.append(
+            ParticipantIdentity(name=name, organization=organization, title=title)
+        )
+    return verified
