@@ -120,12 +120,22 @@ def _receipt_prompt() -> str:
 """.strip()
 
 
-def analyze_receipt_pdf(file_bytes: bytes, filename: str) -> ReceiptExtraction:
+def analyze_receipt_pdf(
+    file_bytes: bytes,
+    filename: str,
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+) -> ReceiptExtraction:
     if not file_bytes:
         raise RuntimeError("영수증 PDF가 비어 있습니다.")
 
-    client = OpenAI(api_key=_secret("OPENAI_API_KEY"))
-    model = _secret("OPENAI_RECEIPT_MODEL", _secret("OPENAI_MODEL", "gpt-5.6-luna"))
+    resolved_api_key = str(api_key or "").strip() or _secret("OPENAI_API_KEY")
+    resolved_model = str(model or "").strip() or _secret(
+        "OPENAI_RECEIPT_MODEL", _secret("OPENAI_MODEL", "gpt-5.6-luna")
+    )
+    client = OpenAI(api_key=resolved_api_key)
+    model = resolved_model
 
     temp_path = ""
     uploaded_id = ""
@@ -177,7 +187,11 @@ def analyze_receipt_pdf(file_bytes: bytes, filename: str) -> ReceiptExtraction:
                 pass
 
 
-def lookup_business_status(business_number: object) -> BusinessStatus:
+def lookup_business_status(
+    business_number: object,
+    *,
+    service_key: str | None = None,
+) -> BusinessStatus:
     digits = normalize_business_number(business_number)
     if len(digits) != 10:
         return BusinessStatus(
@@ -185,9 +199,17 @@ def lookup_business_status(business_number: object) -> BusinessStatus:
             error="유효한 10자리 사업자등록번호를 확인하지 못했습니다.",
         )
 
-    try:
-        service_key = _secret("NTS_BUSINESS_SERVICE_KEY")
-    except RuntimeError:
+    if service_key is None:
+        try:
+            service_key = _secret("NTS_BUSINESS_SERVICE_KEY")
+        except RuntimeError:
+            return BusinessStatus(
+                business_number=digits,
+                configured=False,
+                error="국세청 사업자 상태조회 API Secret이 설정되지 않았습니다.",
+            )
+    service_key = str(service_key or "").strip()
+    if not service_key:
         return BusinessStatus(
             business_number=digits,
             configured=False,
