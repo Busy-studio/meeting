@@ -657,17 +657,6 @@ if "result" in st.session_state:
         receipt_bytes = st.session_state.get("receipt_bytes")
         receipt_filename = str(st.session_state.get("receipt_filename") or "")
         receipt_status = dict(st.session_state.get("receipt_status") or {})
-        combined_pdf_bytes = None
-        combined_pdf_name = None
-        if isinstance(receipt_bytes, (bytes, bytearray)) and receipt_bytes:
-            combined_pdf_bytes = build_meeting_receipt_pdf(
-                form,
-                workbook_bytes=workbook_bytes,
-                receipt_bytes=bytes(receipt_bytes),
-                receipt_filename=receipt_filename,
-                tax_label=str(receipt_status.get("tax_label") or "과세유형 확인 필요"),
-            )
-            combined_pdf_name = pdf_export_filename(file_name)
 
         final_clicked = st.button(
             "최종 회의록 생성",
@@ -682,6 +671,18 @@ if "result" in st.session_state:
                 st.session_state["export_filename"] = file_name
                 st.session_state.pop("export_pdf_bytes", None)
                 st.session_state.pop("export_pdf_filename", None)
+
+                combined_pdf_bytes = None
+                combined_pdf_name = None
+                if isinstance(receipt_bytes, (bytes, bytearray)) and receipt_bytes:
+                    combined_pdf_bytes = build_meeting_receipt_pdf(
+                        form,
+                        workbook_bytes=workbook_bytes,
+                        receipt_bytes=bytes(receipt_bytes),
+                        receipt_filename=receipt_filename,
+                        tax_label=str(receipt_status.get("tax_label") or "과세유형 확인 필요"),
+                    )
+                    combined_pdf_name = pdf_export_filename(file_name)
 
                 auto_files = [
                     (
