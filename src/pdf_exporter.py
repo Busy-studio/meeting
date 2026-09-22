@@ -65,6 +65,19 @@ def _ensure_one_page_print_setup(workbook: bytes) -> bytes:
         setup.attrib.pop("scale", None)
         setup.attrib.update(fitToWidth="1", fitToHeight="1", paperSize="9", orientation="portrait")
 
+        # The template's lower horizontal rule starts at row 20. Exclude
+        # the trailing rows and decorative objects outside the meeting form.
+        margins = sheet.find(tag("pageMargins"))
+        if margins is not None:
+            margins.attrib.update(left="0.2", right="0.2", top="0.2", bottom="0.2",
+                                  header="0", footer="0")
+        print_options = sheet.find(tag("printOptions"))
+        if print_options is None:
+            print_options = ET.Element(tag("printOptions"))
+            sheet.insert(list(sheet).index(margins), print_options)
+        print_options.set("horizontalCentered", "1")
+        print_options.set("verticalCentered", "1")
+
         book = ET.fromstring(source.read("xl/workbook.xml"))
         sheets = book.find(tag("sheets"))
         if sheets is None or not len(sheets):
@@ -76,6 +89,19 @@ def _ensure_one_page_print_setup(workbook: bytes) -> bytes:
         for view in book.iter(tag("workbookView")):
             view.set("activeTab", "0")
             view.set("firstSheet", "0")
+
+        names = book.find(tag("definedNames"))
+        if names is None:
+            names = ET.Element(tag("definedNames"))
+            book.insert(list(book).index(sheets) + 1, names)
+        for defined in list(names):
+            if defined.get("name") == "_xlnm.Print_Area":
+                names.remove(defined)
+        print_area = ET.SubElement(names, tag("definedName"), {
+            "name": "_xlnm.Print_Area", "localSheetId": "0",
+        })
+        sheet_name = sheets[0].get("name", "회의록").replace("'", "''")
+        print_area.text = f"'{sheet_name}'!$B$1:$BK$20"
 
         output = io.BytesIO()
         with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as target:
