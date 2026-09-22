@@ -378,7 +378,28 @@ if receipt_error:
 
 receipt_result = st.session_state.get("_receipt_result")
 if isinstance(receipt_result, dict):
-    st.success("영수증 분석을 완료했습니다.")
+    missing_fields = []
+    for field_key, field_label in (
+        ("merchant_name", "카드 사용처(상호명)"),
+        ("business_number", "사업자등록번호"),
+        ("payment_date", "결제일자"),
+        ("payment_time", "결제시간"),
+        ("total_amount", "총액"),
+        ("supply_amount", "공급가액"),
+        ("vat_amount", "부가세액"),
+    ):
+        value = receipt_result.get(field_key)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing_fields.append(field_label)
+
+    st.success("영수증 분석을 완료했습니다. 인식된 항목만 자동 입력했습니다.")
+    if missing_fields:
+        st.warning(
+            "OCR에서 인식하지 못한 항목: "
+            + ", ".join(missing_fields)
+            + " — 필요한 값은 아래 회의 기본정보에서 직접 입력해 주세요."
+        )
+
     merchant_name = str(receipt_result.get("merchant_name") or "확인 필요")
     business_number = format_business_number(receipt_result.get("business_number"))
     payment_date_text = str(receipt_result.get("payment_date") or "확인 필요")
