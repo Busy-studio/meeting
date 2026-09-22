@@ -13,7 +13,7 @@ from streamlit_cookies_controller import CookieController
 
 from src.db import load_businesses, load_meetings, load_participant_links, save_business, save_final_meeting
 from src.exporter import build_meeting_workbook, compose_content_block, export_filename
-from src.generator import generate_meeting
+from src.generator import extract_participant_identities, generate_meeting
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
 from src.receipt import (
     amount_values_for_form,
@@ -94,14 +94,25 @@ def _receipt_business_number_changed() -> None:
 
 
 def _participant_count(raw: str) -> int:
-    """Count unique people recognized from the final edited participant text."""
-    items = parse_participants_for_save(raw)
-    names = {
-        str(item.get("normalized_name") or item.get("name") or "").strip()
-        for item in items
-        if str(item.get("normalized_name") or item.get("name") or "").strip()
+    """Count distinct people in the final edited participant text with GPT-5.6 Luna."""
+    text = str(raw or "").strip()
+    if not text:
+        return 0
+
+    cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    cached = st.session_state.get("_participant_identity_cache")
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return int(cached.get("count") or 0)
+
+    with st.spinner("참석자 인원수를 확인하고 있습니다."):
+        people = extract_participant_identities(text)
+
+    st.session_state["_participant_identity_cache"] = {
+        "key": cache_key,
+        "count": len(people),
+        "people": [person.model_dump() for person in people],
     }
-    return len(names)
+    return len(people)
 
 
 def _current_meeting_place() -> str:
@@ -220,6 +231,7 @@ def _clear_result() -> None:
     st.session_state.pop("saved_meeting_id", None)
     st.session_state.pop("export_bytes", None)
     st.session_state.pop("export_filename", None)
+    st.session_state.pop("_participant_identity_cache", None)
     for key in EDIT_KEYS:
         st.session_state.pop(key, None)
 
@@ -644,9 +656,10 @@ if "result" in st.session_state:
         }
 
         participant_items = parse_participants_for_save(participants)
-        participant_count = _participant_count(participants)
         amount_total = max(0, int(st.session_state.get("amount_total", 0) or 0))
+        participant_count = _participant_count(participants) if amount_total > 0 else 0
         allowed_total = participant_count * MEETING_COST_PER_PERSON
+        participant_count_unknown = amount_total > 0 and participant_count <= 0
         over_budget = participant_count > 0 and amount_total > allowed_total
 
         workbook_bytes = build_meeting_workbook(form)
@@ -672,7 +685,17 @@ if "result" in st.session_state:
             business["name"], meeting_date, form["author_name"]
         )
 
-        if over_budget:
+        if participant_count_unknown:
+            if st.button(
+                "최종 회의록 생성",
+                type="primary",
+                key="final_excel_generate_participant_unknown",
+                use_container_width=True,
+            ):
+                st.error(
+                    "참석자 인원수를 확인할 수 없습니다. 참석자 명단에 사람 이름을 명확히 입력해 주세요."
+                )
+        elif over_budget:
             if st.button(
                 "최종 회의록 생성",
                 type="primary",
