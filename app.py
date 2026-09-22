@@ -456,6 +456,9 @@ if isinstance(receipt_result, dict):
     queried_number = str(st.session_state.get("_receipt_business_number_queried") or "")
     current_digits = normalize_business_number(st.session_state.get("receipt_business_number"))
 
+    if len(current_digits) == 10 and queried_number != current_digits:
+        st.info("사업자등록번호가 변경되었습니다. 사업자 조회를 눌러 과세유형과 사업자 상태를 다시 확인해 주세요.")
+
     summary_parts = [f"실제 거래처: {merchant_name}"]
     if status.get("business_status") and queried_number == current_digits:
         summary_parts.append(f"상태: {status['business_status']}")
