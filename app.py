@@ -662,6 +662,7 @@ if "result" in st.session_state:
         if isinstance(receipt_bytes, (bytes, bytearray)) and receipt_bytes:
             combined_pdf_bytes = build_meeting_receipt_pdf(
                 form,
+                workbook_bytes=workbook_bytes,
                 receipt_bytes=bytes(receipt_bytes),
                 receipt_filename=receipt_filename,
                 tax_label=str(receipt_status.get("tax_label") or "과세유형 확인 필요"),
