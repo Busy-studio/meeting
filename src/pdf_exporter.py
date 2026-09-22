@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-import io
+import shutil
+import subprocess
+import tempfile
 from datetime import date
 from pathlib import Path
 
@@ -143,6 +145,61 @@ def _meeting_page(pdf: pymupdf.Document, data: dict[str, object]) -> None:
     _row(page, y, "회의 내용 및\n향후 계획", content, height=remaining)
 
 
+def _convert_workbook_to_pdf(workbook_bytes: bytes) -> bytes | None:
+    executable = shutil.which("libreoffice") or shutil.which("soffice")
+    if not executable:
+        return None
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="meeting_pdf_") as tmpdir:
+            root = Path(tmpdir)
+            xlsx_path = root / "meeting.xlsx"
+            pdf_path = root / "meeting.pdf"
+            profile_uri = (root / "lo-profile").resolve().as_uri()
+            xlsx_path.write_bytes(workbook_bytes)
+
+            completed = subprocess.run(
+                [
+                    executable,
+                    f"-env:UserInstallation={profile_uri}",
+                    "--headless",
+                    "--convert-to",
+                    "pdf",
+                    "--outdir",
+                    str(root),
+                    str(xlsx_path),
+                ],
+                capture_output=True,
+                text=True,
+                timeout=90,
+                check=False,
+            )
+            if completed.returncode != 0 or not pdf_path.exists():
+                return None
+            return pdf_path.read_bytes()
+    except Exception:
+        return None
+
+
+def _append_meeting_page(
+    pdf: pymupdf.Document,
+    *,
+    workbook_bytes: bytes,
+    data: dict[str, object],
+) -> None:
+    converted = _convert_workbook_to_pdf(workbook_bytes)
+    if converted:
+        source = pymupdf.open(stream=converted, filetype="pdf")
+        try:
+            if source.page_count:
+                pdf.insert_pdf(source, from_page=0, to_page=0)
+                return
+        finally:
+            source.close()
+
+    _meeting_page(pdf, data)
+
+
 def _receipt_page(
     pdf: pymupdf.Document,
     receipt_bytes: bytes,
@@ -192,13 +249,14 @@ def _receipt_page(
 def build_meeting_receipt_pdf(
     data: dict[str, object],
     *,
+    workbook_bytes: bytes,
     receipt_bytes: bytes,
     receipt_filename: str,
     tax_label: str,
 ) -> bytes:
     pdf = pymupdf.open()
     try:
-        _meeting_page(pdf, data)
+        _append_meeting_page(pdf, workbook_bytes=workbook_bytes, data=data)
         _receipt_page(pdf, receipt_bytes, receipt_filename, tax_label)
         return pdf.tobytes(garbage=4, deflate=True)
     finally:
