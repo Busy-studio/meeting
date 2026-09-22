@@ -337,6 +337,9 @@ if receipt_file is not None:
     receipt_bytes = receipt_file.getvalue()
     receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
     if receipt_hash != st.session_state.get("_receipt_processed_hash"):
+        st.session_state.pop("_receipt_result", None)
+        st.session_state.pop("_receipt_status", None)
+        st.session_state.pop("_receipt_amount_warning", None)
         try:
             with st.spinner("영수증을 분석하고 있습니다."):
                 receipt = analyze_receipt_pdf(receipt_bytes, receipt_file.name)
