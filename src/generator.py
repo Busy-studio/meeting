@@ -64,9 +64,14 @@ def generate_meeting(
     similar: pd.DataFrame,
     keep_exact_purpose: bool,
     business_name: str,
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
 ) -> GeneratedMeeting:
-    client = OpenAI(api_key=_secret("OPENAI_API_KEY"))
-    model = _secret("OPENAI_MODEL", "gpt-5.6-luna")
+    resolved_api_key = str(api_key or "").strip() or _secret("OPENAI_API_KEY")
+    resolved_model = str(model or "").strip() or _secret("OPENAI_MODEL", "gpt-5.6-luna")
+    client = OpenAI(api_key=resolved_api_key)
+    model = resolved_model
     exact_instruction = (
         "사용자가 입력한 문장을 meeting_purpose에 글자 하나 바꾸지 말고 그대로 사용한다."
         if keep_exact_purpose and user_input.strip()
