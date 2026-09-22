@@ -111,7 +111,7 @@ def render_business_form(
 
     edit_mode = bool(st.session_state.get("_business_edit_mode", is_new))
 
-    with st.expander("사업 정보", expanded=True):
+    with st.expander("사업 정보", expanded=False):
         _render_business_fields(disabled=(not is_new and not edit_mode))
 
         if is_new:
