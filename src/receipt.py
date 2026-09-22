@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-import base64
 import json
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from typing import Any
@@ -126,35 +127,54 @@ def analyze_receipt_pdf(file_bytes: bytes, filename: str) -> ReceiptExtraction:
     client = OpenAI(api_key=_secret("OPENAI_API_KEY"))
     model = _secret("OPENAI_RECEIPT_MODEL", _secret("OPENAI_MODEL", "gpt-5.6-luna"))
 
-    safe_filename = str(filename or "receipt.pdf").strip() or "receipt.pdf"
-    encoded = base64.b64encode(file_bytes).decode("ascii")
-    file_data = f"data:application/pdf;base64,{encoded}"
-
-    response = client.responses.create(
-        model=model,
-        input=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "input_file",
-                        "filename": safe_filename,
-                        "file_data": file_data,
-                        "detail": "high",
-                    },
-                    {"type": "input_text", "text": _receipt_prompt()},
-                ],
-            }
-        ],
-        # 영수증은 OCR뿐 아니라 실제 판매자/결제대행사 구분 판단도 필요하므로
-        # PDF detail=high와 reasoning=low를 함께 사용한다.
-        reasoning={"effort": "low"},
-        prompt_cache_options={"mode": "explicit"},
-    )
+    temp_path = ""
+    uploaded_id = ""
     try:
-        return ReceiptExtraction.model_validate(_extract_json(response.output_text))
-    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"영수증 분석 결과 형식 검증 실패: {exc}") from exc
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(file_bytes)
+            temp_path = tmp.name
+
+        with open(temp_path, "rb") as stream:
+            uploaded = client.files.create(file=stream, purpose="user_data")
+        uploaded_id = uploaded.id
+
+        response = client.responses.create(
+            model=model,
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_file",
+                            "file_id": uploaded_id,
+                            "detail": "high",
+                        },
+                        {"type": "input_text", "text": _receipt_prompt()},
+                    ],
+                }
+            ],
+            # 영수증은 OCR뿐 아니라 실제 판매자/결제대행사 구분 판단도 필요하므로
+            # PDF detail=high와 reasoning=low를 함께 사용한다.
+            reasoning={"effort": "low"},
+            prompt_cache_options={"mode": "explicit"},
+            store=False,
+        )
+        try:
+            return ReceiptExtraction.model_validate(_extract_json(response.output_text))
+        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"영수증 분석 결과 형식 검증 실패: {exc}") from exc
+    finally:
+        # 분석 성공/실패 여부와 관계없이 OpenAI에 올린 임시 파일을 즉시 삭제한다.
+        if uploaded_id:
+            try:
+                client.files.delete(uploaded_id)
+            except Exception:
+                pass
+        if temp_path:
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
 
 
 def lookup_business_status(business_number: object) -> BusinessStatus:
