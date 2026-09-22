@@ -18,6 +18,10 @@ Supabase의 회의 지식 DB에서 유사 회의와 실제 참석자 이력을 �
 - 국세청 사업자등록 상태조회 API로 실제 판매자의 계속/휴폐업 상태와 과세유형 확인
 - 결제일시·거래처·총액·공급가액·부가세액을 회의 기본정보에 자동 반영
 - 공급가액/부가세액 수동 수정 시 항상 소요금액 합계에 맞춰 반대 항목 자동 조정
+- 영수증 OCR은 1회만 수행하고 재분석·웹검색 fallback은 수행하지 않음
+- OCR 누락 항목은 사용자에게 즉시 안내하여 회의 기본정보에서 직접 보완
+- 영수증 PDF 원본은 Supabase/DB에 저장하지 않으며 OpenAI 임시 파일은 분석 직후 삭제
+- 영수증 Responses 요청은 `store=False`로 처리
 
 ## 기본 지원사업
 
@@ -73,6 +77,8 @@ Streamlit 서버
 - `meeting` 스키마은 RLS가 활성화되어 있고 일반 `anon/authenticated` 테이블 접근권한이 없습니다.
 - Streamlit 서버만 Supabase Secret Key로 제한된 RPC를 호출합니다.
 - Secret Key, OpenAI API Key, 비밀번호, DB 파일은 GitHub에 커밋하지 않습니다.
+- 영수증 PDF 원본은 Supabase/DB에 저장하지 않습니다.
+- OCR을 위해 OpenAI Files에 생성한 임시 파일은 분석 성공/실패와 관계없이 즉시 삭제를 시도합니다.
 - Excel 템플릿은 개인 회의정보가 제거된 빈 양식만 저장소에 포함합니다.
 
 ## 로컬 실행
