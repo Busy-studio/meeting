@@ -500,8 +500,11 @@ for key in ("author_name", "card_merchant"):
     st.session_state.setdefault(key, "")
 st.session_state.setdefault("meeting_place_selector", "삼성산학협동관 303-2호")
 st.session_state.setdefault("meeting_place_custom", "")
+st.session_state.setdefault("receipt_business_number", "")
 for key in ("amount_total", "amount_supply", "amount_vat"):
     st.session_state.setdefault(key, 0)
+
+_poll_background_jobs()
 
 st.subheader("1. 영수증 업로드 (선택사항)")
 st.caption("실제 사용한 카드 영수증 PDF를 1회 분석해 회의 기본정보에 자동 반영합니다. 읽지 못한 항목은 바로 수기 입력 안내가 표시됩니다.")
@@ -515,50 +518,55 @@ receipt_file = st.file_uploader(
 if receipt_file is not None:
     receipt_bytes = receipt_file.getvalue()
     receipt_hash = hashlib.sha256(receipt_bytes).hexdigest()
-    if receipt_hash != st.session_state.get("_receipt_processed_hash"):
+    st.session_state["_receipt_active_hash"] = receipt_hash
+
+    receipt_future = st.session_state.get("_receipt_future")
+    receipt_running = isinstance(receipt_future, Future) and not receipt_future.done()
+    if (
+        not receipt_running
+        and receipt_hash != st.session_state.get("_receipt_processed_hash")
+        and receipt_hash != st.session_state.get("_receipt_job_hash")
+    ):
         st.session_state.pop("_receipt_result", None)
         st.session_state.pop("_receipt_status", None)
         st.session_state.pop("_receipt_amount_warning", None)
-        try:
-            with st.spinner("영수증을 분석하고 있습니다."):
-                receipt = analyze_receipt_pdf(receipt_bytes, receipt_file.name)
-                receipt_business_digits = normalize_business_number(receipt.business_number)
-                receipt_status = (
-                    lookup_business_status(receipt_business_digits).to_dict()
-                    if len(receipt_business_digits) == 10
-                    else {}
-                )
-                receipt_total, receipt_supply, receipt_vat, amount_warning = amount_values_for_form(receipt)
+        st.session_state.pop("_receipt_analysis_error", None)
 
-                receipt_date = parse_payment_date(receipt.payment_date)
-                if receipt_date is not None:
-                    st.session_state["meeting_date"] = receipt_date
+        snapshot = {
+            "meeting_date": st.session_state.get("meeting_date"),
+            "meeting_time": st.session_state.get("meeting_time"),
+            "card_merchant": st.session_state.get("card_merchant"),
+            "amount_total": st.session_state.get("amount_total"),
+            "amount_supply": st.session_state.get("amount_supply"),
+            "amount_vat": st.session_state.get("amount_vat"),
+            "receipt_business_number": st.session_state.get("receipt_business_number"),
+        }
+        api_key = _required_secret("OPENAI_API_KEY")
+        receipt_model = str(
+            st.secrets.get(
+                "OPENAI_RECEIPT_MODEL",
+                st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna"),
+            )
+        ).strip()
+        nts_service_key = str(st.secrets.get("NTS_BUSINESS_SERVICE_KEY", "") or "").strip()
 
-                receipt_time = meeting_window_from_payment_time(receipt.payment_time)
-                if receipt_time:
-                    st.session_state["meeting_time"] = receipt_time
+        st.session_state["_receipt_job_hash"] = receipt_hash
+        st.session_state["_receipt_job_snapshot"] = snapshot
+        st.session_state["_receipt_future"] = _background_executor().submit(
+            _receipt_analysis_job,
+            receipt_bytes,
+            receipt_file.name,
+            api_key,
+            receipt_model,
+            nts_service_key,
+        )
+        st.rerun()
+else:
+    st.session_state["_receipt_active_hash"] = ""
 
-                if receipt.merchant_name:
-                    st.session_state["card_merchant"] = receipt.merchant_name
-
-                st.session_state["amount_total"] = receipt_total
-                st.session_state["amount_supply"] = receipt_supply
-                st.session_state["amount_vat"] = receipt_vat
-                st.session_state["receipt_business_number"] = (
-                    format_business_number(receipt_business_digits)
-                    if len(receipt_business_digits) == 10
-                    else receipt_business_digits
-                )
-                st.session_state["_receipt_result"] = receipt.model_dump()
-                st.session_state["_receipt_status"] = receipt_status
-                st.session_state["_receipt_business_number_queried"] = (
-                    receipt_business_digits if receipt_status else ""
-                )
-                st.session_state["_receipt_amount_warning"] = amount_warning
-                st.session_state["_receipt_processed_hash"] = receipt_hash
-                st.session_state.pop("_receipt_analysis_error", None)
-        except Exception as exc:
-            st.session_state["_receipt_analysis_error"] = str(exc)
+receipt_future = st.session_state.get("_receipt_future")
+if isinstance(receipt_future, Future) and not receipt_future.done():
+    st.info("영수증을 분석하고 있습니다. 분석 중에도 아래 항목을 계속 입력할 수 있습니다.")
 
 receipt_error = st.session_state.get("_receipt_analysis_error")
 if receipt_error:
@@ -730,11 +738,25 @@ else:
     )
     keep_exact = st.checkbox("입력한 문장을 회의 목적으로 그대로 사용", value=False)
 
+meeting_future = st.session_state.get("_meeting_future")
+generation_busy = isinstance(meeting_future, Future) and not meeting_future.done()
+
 col1, col2 = st.columns([3, 1])
 with col1:
-    generate_clicked = st.button("회의내용 생성", type="primary")
+    generate_clicked = st.button(
+        "회의내용 생성",
+        type="primary",
+        disabled=generation_busy,
+    )
 with col2:
     st.button("결과 초기화", on_click=_clear_result)
+
+if generation_busy:
+    st.info("회의내용을 생성하고 있습니다. 생성 중에도 사업 및 회의 기본정보를 계속 입력·수정할 수 있습니다.")
+
+generation_error = st.session_state.pop("_meeting_generation_error", None)
+if generation_error:
+    st.error(generation_error)
 
 if generate_clicked:
     business = business_from_state()
@@ -743,20 +765,41 @@ if generate_clicked:
     elif mode == "키워드 또는 회의 목적 입력" and not user_input.strip():
         st.warning("키워드 또는 회의 목적을 입력하세요.")
     else:
-        st.session_state["pending_generation"] = {
+        request = {
             "mode": mode,
             "category": category,
             "user_input": user_input,
             "keep_exact": keep_exact,
             "business_name": business["name"],
         }
-        with st.spinner("회의록을 생성하고 있습니다..."):
-            try:
-                _run_pending_generation()
-            except Exception as exc:
-                st.error(str(exc))
-            else:
-                st.rerun()
+        try:
+            similar, selected_participants = _prepare_meeting_generation(request)
+            api_key = _required_secret("OPENAI_API_KEY")
+            model = str(st.secrets.get("OPENAI_MODEL", "gpt-5.6-luna")).strip()
+
+            st.session_state.pop("result", None)
+            st.session_state.pop("saved_meeting_id", None)
+            st.session_state.pop("export_bytes", None)
+            st.session_state.pop("export_filename", None)
+            for key in EDIT_KEYS:
+                st.session_state.pop(key, None)
+
+            st.session_state["_meeting_job_meta"] = {
+                "participant_text": ", ".join(selected_participants),
+            }
+            st.session_state["_meeting_future"] = _background_executor().submit(
+                _meeting_generation_job,
+                category,
+                user_input,
+                similar,
+                keep_exact,
+                business["name"],
+                api_key,
+                model,
+            )
+            st.rerun()
+        except Exception as exc:
+            st.error(str(exc))
 
 if "result" in st.session_state:
     st.divider()
