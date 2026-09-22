@@ -1,12 +1,10 @@
 from __future__ import annotations
 
+import base64
 import json
-import os
 import re
-import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 from typing import Any
 from urllib.parse import unquote
 
@@ -128,50 +126,35 @@ def analyze_receipt_pdf(file_bytes: bytes, filename: str) -> ReceiptExtraction:
     client = OpenAI(api_key=_secret("OPENAI_API_KEY"))
     model = _secret("OPENAI_RECEIPT_MODEL", _secret("OPENAI_MODEL", "gpt-5.6-luna"))
 
-    suffix = Path(filename or "receipt.pdf").suffix.lower()
-    if suffix != ".pdf":
-        suffix = ".pdf"
+    safe_filename = str(filename or "receipt.pdf").strip() or "receipt.pdf"
+    encoded = base64.b64encode(file_bytes).decode("ascii")
+    file_data = f"data:application/pdf;base64,{encoded}"
 
-    temp_path = ""
-    uploaded_id = ""
+    response = client.responses.create(
+        model=model,
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_file",
+                        "filename": safe_filename,
+                        "file_data": file_data,
+                        "detail": "high",
+                    },
+                    {"type": "input_text", "text": _receipt_prompt()},
+                ],
+            }
+        ],
+        # 영수증은 복잡한 추론보다 정확한 시각정보 추출이 핵심이다.
+        # PDF detail=high는 유지하고 reasoning은 none으로 두어 지연 시간을 줄인다.
+        reasoning={"effort": "none"},
+        prompt_cache_options={"mode": "explicit"},
+    )
     try:
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
-            tmp.write(file_bytes)
-            temp_path = tmp.name
-
-        with open(temp_path, "rb") as stream:
-            uploaded = client.files.create(file=stream, purpose="user_data")
-        uploaded_id = uploaded.id
-
-        response = client.responses.create(
-            model=model,
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_file", "file_id": uploaded_id, "detail": "high"},
-                        {"type": "input_text", "text": _receipt_prompt()},
-                    ],
-                }
-            ],
-            reasoning={"effort": "low"},
-            prompt_cache_options={"mode": "explicit"},
-        )
-        try:
-            return ReceiptExtraction.model_validate(_extract_json(response.output_text))
-        except (ValidationError, ValueError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"영수증 분석 결과 형식 검증 실패: {exc}") from exc
-    finally:
-        if uploaded_id:
-            try:
-                client.files.delete(uploaded_id)
-            except Exception:
-                pass
-        if temp_path:
-            try:
-                os.unlink(temp_path)
-            except OSError:
-                pass
+        return ReceiptExtraction.model_validate(_extract_json(response.output_text))
+    except (ValidationError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"영수증 분석 결과 형식 검증 실패: {exc}") from exc
 
 
 def lookup_business_status(business_number: object) -> BusinessStatus:
