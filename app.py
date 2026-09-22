@@ -325,7 +325,7 @@ for key in ("amount_total", "amount_supply", "amount_vat"):
     st.session_state.setdefault(key, 0)
 
 st.subheader("1. 영수증 업로드 (선택사항)")
-st.caption("실제 사용한 카드 영수증 PDF를 올리면 결제정보와 실제 판매자 정보를 분석해 회의 기본정보에 자동으로 반영합니다.")
+st.caption("실제 사용한 카드 영수증 PDF를 1회 분석해 회의 기본정보에 자동 반영합니다. 읽지 못한 항목은 바로 수기 입력 안내가 표시됩니다.")
 receipt_file = st.file_uploader(
     "영수증 PDF",
     type=["pdf"],
@@ -392,7 +392,7 @@ if isinstance(receipt_result, dict):
         if value is None or (isinstance(value, str) and not value.strip()):
             missing_fields.append(field_label)
 
-    st.success("영수증 분석을 완료했습니다. 인식된 항목만 자동 입력했습니다.")
+    st.success("영수증 분석을 완료했습니다. 인식되거나 계산 가능한 항목을 자동 반영했습니다.")
     if missing_fields:
         st.warning(
             "OCR에서 인식하지 못한 항목: "
