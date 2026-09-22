@@ -1,8 +1,8 @@
-# 회의 뭐했니? v1.1
+# 회의 뭐했니? v1.2
 
 Supabase의 회의 지식 DB에서 유사 회의와 실제 참석자 이력을 검색하고, GPT-5.6 Luna로 회의 목적·회의내용·향후계획을 생성한 뒤 사용자가 직접 수정하여 기존 PNU 회의록 Excel 양식으로 출력하는 Streamlit 앱입니다.
 
-## v1.1 주요 기능
+## v1.2 주요 기능
 
 - 기존 GCS + SQLite 읽기 구조를 Supabase 기반으로 전환
 - GPT-5.6 Luna (`gpt-5.6-luna`) 사용
@@ -13,6 +13,11 @@ Supabase의 회의 지식 DB에서 유사 회의와 실제 참석자 이력을 �
 - 최종 확정본만 Supabase에 저장하고 수정이력 관리
 - 최종 확정 참석자를 인물/기관 관계 DB에 반영
 - 기존 회의록 서식을 보존한 `.xlsx` 생성 및 다운로드
+- 선택형 영수증 PDF 업로드 및 AI 기반 스캔 영수증 정보 추출
+- 결제대행/플랫폼이 있는 영수증은 실제 판매자·이용상점을 거래처로 우선 판별
+- 국세청 사업자등록 상태조회 API로 실제 판매자의 계속/휴폐업 상태와 과세유형 확인
+- 결제일시·거래처·총액·공급가액·부가세액을 회의 기본정보에 자동 반영
+- 공급가액/부가세액 수동 수정 시 항상 소요금액 합계에 맞춰 반대 항목 자동 조정
 
 ## 기본 지원사업
 
@@ -33,6 +38,8 @@ Streamlit Community Cloud에서 이 저장소의 `app.py`를 배포합니다.
 OPENAI_API_KEY = "sk-..."
 OPENAI_MODEL = "gpt-5.6-luna"
 
+NTS_BUSINESS_SERVICE_KEY = "공공데이터포털-서비스키"
+
 SUPABASE_URL = "https://your-project-ref.supabase.co"
 SUPABASE_SECRET_KEY = "sb_secret_..."
 
@@ -50,7 +57,8 @@ DEVICE_AUTH_DAYS = 365
   ↓
 Streamlit 서버
   ├─ Supabase: 유사 회의 / 참석자 / 사업정보 조회
-  ├─ OpenAI GPT-5.6 Luna: 회의내용 생성
+  ├─ OpenAI GPT-5.6 Luna: 회의내용 생성 / 영수증 PDF 분석
+  ├─ 국세청 API: 실제 판매자 사업자등록 상태·과세유형 조회
   ↓
 사용자 직접 수정
   ↓
