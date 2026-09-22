@@ -93,26 +93,31 @@ def _receipt_business_number_changed() -> None:
     st.session_state["_receipt_business_number_queried"] = ""
 
 
-def _participant_count(raw: str) -> int:
-    """Count distinct people in the final edited participant text with GPT-5.6 Luna."""
+def _participant_analysis(raw: str) -> tuple[int, list[str]]:
+    """Count distinct people and return unresolved same-name ambiguities."""
     text = str(raw or "").strip()
     if not text:
-        return 0
+        return 0, []
 
     cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
     cached = st.session_state.get("_participant_identity_cache")
     if isinstance(cached, dict) and cached.get("key") == cache_key:
-        return int(cached.get("count") or 0)
+        return (
+            int(cached.get("count") or 0),
+            [str(x) for x in (cached.get("ambiguous_names") or []) if str(x).strip()],
+        )
 
     with st.spinner("참석자 인원수를 확인하고 있습니다."):
-        people = extract_participant_identities(text)
+        analysis = extract_participant_identities(text)
 
+    ambiguous_names = [str(x).strip() for x in analysis.ambiguous_names if str(x).strip()]
     st.session_state["_participant_identity_cache"] = {
         "key": cache_key,
-        "count": len(people),
-        "people": [person.model_dump() for person in people],
+        "count": len(analysis.people),
+        "people": [person.model_dump() for person in analysis.people],
+        "ambiguous_names": ambiguous_names,
     }
-    return len(people)
+    return len(analysis.people), ambiguous_names
 
 
 def _current_meeting_place() -> str:
@@ -657,9 +662,13 @@ if "result" in st.session_state:
 
         participant_items = parse_participants_for_save(participants)
         amount_total = max(0, int(st.session_state.get("amount_total", 0) or 0))
-        participant_count = _participant_count(participants) if amount_total > 0 else 0
+        if amount_total > 0:
+            participant_count, ambiguous_names = _participant_analysis(participants)
+        else:
+            participant_count, ambiguous_names = 0, []
         allowed_total = participant_count * MEETING_COST_PER_PERSON
         participant_count_unknown = amount_total > 0 and participant_count <= 0
+        participant_ambiguity = amount_total > 0 and bool(ambiguous_names)
         over_budget = participant_count > 0 and amount_total > allowed_total
 
         workbook_bytes = build_meeting_workbook(form)
@@ -685,7 +694,19 @@ if "result" in st.session_state:
             business["name"], meeting_date, form["author_name"]
         )
 
-        if participant_count_unknown:
+        if participant_ambiguity:
+            if st.button(
+                "최종 회의록 생성",
+                type="primary",
+                key="final_excel_generate_participant_ambiguity",
+                use_container_width=True,
+            ):
+                st.error(
+                    "동명이인 여부를 확인할 수 없습니다: "
+                    + ", ".join(ambiguous_names)
+                    + ". 참석자 명단에서 소속·직급·직책 등 구분 정보를 보완해 주세요."
+                )
+        elif participant_count_unknown:
             if st.button(
                 "최종 회의록 생성",
                 type="primary",
