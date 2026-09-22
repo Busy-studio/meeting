@@ -146,9 +146,9 @@ def analyze_receipt_pdf(file_bytes: bytes, filename: str) -> ReceiptExtraction:
                 ],
             }
         ],
-        # 영수증은 복잡한 추론보다 정확한 시각정보 추출이 핵심이다.
-        # PDF detail=high는 유지하고 reasoning은 none으로 두어 지연 시간을 줄인다.
-        reasoning={"effort": "none"},
+        # 영수증은 OCR뿐 아니라 실제 판매자/결제대행사 구분 판단도 필요하므로
+        # PDF detail=high와 reasoning=low를 함께 사용한다.
+        reasoning={"effort": "low"},
         prompt_cache_options={"mode": "explicit"},
     )
     try:
