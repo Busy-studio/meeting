@@ -24,6 +24,7 @@ class ParticipantIdentity(BaseModel):
 
 class ParticipantIdentityExtraction(BaseModel):
     people: list[ParticipantIdentity] = Field(default_factory=list, max_length=100)
+    ambiguous_names: list[str] = Field(default_factory=list, max_length=100)
 
 
 def _secret(name: str, default: str | None = None) -> str:
@@ -116,8 +117,8 @@ def generate_meeting(
     return result
 
 
-def extract_participant_identities(raw: str) -> list[ParticipantIdentity]:
-    """Extract distinct explicitly written people from the final participant text.
+def extract_participant_identities(raw: str) -> ParticipantIdentityExtraction:
+    """Extract distinct people and flag unresolved same-name ambiguity.
 
     Organization/title are optional. They are used only when the text itself
     provides them, including to distinguish same-name people. The model must
@@ -125,7 +126,7 @@ def extract_participant_identities(raw: str) -> list[ParticipantIdentity]:
     """
     text = str(raw or "").strip()
     if not text:
-        return []
+        return ParticipantIdentityExtraction()
 
     client = OpenAI(api_key=_secret("OPENAI_API_KEY"))
     model = _secret("OPENAI_PARTICIPANT_MODEL", "gpt-5.6-luna")
@@ -146,8 +147,9 @@ def extract_participant_identities(raw: str) -> list[ParticipantIdentity]:
 - organization과 title은 원문에 명시된 경우에만 기록하고, 없으면 빈 문자열로 둔다.
 - 같은 이름이라도 서로 다른 소속이 명확히 적혀 있으면 서로 다른 사람으로 구분한다.
 - 같은 이름이라도 직급/직책이 명확히 다르고 문맥상 서로 다른 사람으로 적혀 있으면 서로 다른 사람으로 구분한다.
-- 같은 이름이 반복되었지만 소속·직급 등 구분 정보가 없으면 임의로 여러 명이라고 추측하지 말고 한 사람으로 처리한다.
-- 같은 사람의 이름이 여러 번 반복되면 한 번만 포함한다.
+- 같은 이름이 서로 다른 참석자 항목에 반복되고, 소속과 직급/직책까지 확인해도 서로 다른 사람인지 같은 사람인지 구분할 수 없으면 그 이름을 ambiguous_names에 넣는다.
+- 동명이인 여부가 불명확한 경우 임의로 인원수를 확정하려고 추측하지 않는다.
+- 같은 사람의 단순 반복이라고 명확한 경우에는 한 번만 포함하고 ambiguous_names에는 넣지 않는다.
 - 문맥만으로 이름, 소속, 직급을 만들어내거나 보충하지 않는다.
 - 확실히 사람 이름이라고 판단하기 어려운 문자열은 제외한다.
 - name, organization, title은 가능한 한 원문 표기를 그대로 사용한다.
@@ -195,4 +197,18 @@ def extract_participant_identities(raw: str) -> list[ParticipantIdentity]:
         verified.append(
             ParticipantIdentity(name=name, organization=organization, title=title)
         )
-    return verified
+
+    ambiguous_names: list[str] = []
+    seen_ambiguous: set[str] = set()
+    for value in result.ambiguous_names:
+        name = str(value or "").strip()
+        normalized = re.sub(r"\s+", "", name).casefold()
+        if not name or normalized not in compact_source or normalized in seen_ambiguous:
+            continue
+        seen_ambiguous.add(normalized)
+        ambiguous_names.append(name)
+
+    return ParticipantIdentityExtraction(
+        people=verified,
+        ambiguous_names=ambiguous_names,
+    )
