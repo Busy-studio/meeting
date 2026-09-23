@@ -110,3 +110,20 @@ def save_business(payload: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(result, dict) or not result.get("id"):
         raise RuntimeError("Supabase에서 사업 정보 저장 결과를 확인하지 못했습니다.")
     return result
+
+
+
+def load_internal_staff() -> list[dict[str, Any]]:
+    """Read the persistent roster, including inactive former employees."""
+    rows = _rpc("meeting_app_list_internal_staff")
+    if not isinstance(rows, list):
+        raise RuntimeError("Supabase 내부 인원 명단 형식이 올바르지 않습니다.")
+    return rows
+
+
+def save_internal_staff(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Atomically apply roster edits or append a new employee."""
+    result = _rpc("meeting_app_save_internal_staff", {"payload": rows})
+    if not isinstance(result, list):
+        raise RuntimeError("Supabase에서 내부 인원 저장 결과를 확인하지 못했습니다.")
+    return result
