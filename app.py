@@ -17,6 +17,8 @@ from src.exporter import build_meeting_workbook, compose_content_block, export_f
 from src.final_download import build_final_download
 from src.pdf_exporter import build_combined_meeting_pdf, tax_type_label
 from src.generator import extract_participant_identities, generate_meeting
+from src.internal_staff import merge_participants, overlapping_staff_names, selected_staff_items
+from src.internal_staff_ui import render_internal_staff_picker
 from src.retrieval import CATEGORIES, parse_participants_for_save, search_similar, select_participants
 from src.receipt import (
     amount_values_for_form,
@@ -823,7 +825,12 @@ if "result" in st.session_state:
     st.divider()
     st.caption("아래 내용은 모두 수정할 수 있습니다. 최종 회의록 생성 시 현재 화면의 내용이 DB와 Excel에 반영됩니다.")
     st.text_area("회의 목적", key="edit_purpose", height=110)
+    selected_internal_staff, _roster_available = render_internal_staff_picker()
     st.text_area("참석자 명단", key="edit_participants", height=150)
+    if selected_internal_staff:
+        st.caption("엑셀 참석자 명단 미리보기: " + merge_participants(
+            selected_internal_staff, st.session_state.get("edit_participants", "")
+        ))
     st.text_area("회의 내용", key="edit_meeting_content", height=220)
     st.text_area("향후 계획", key="edit_future_plan", height=190)
 
@@ -842,7 +849,8 @@ if "result" in st.session_state:
         participants = str(st.session_state.get("edit_participants", "")).strip()
         meeting_content = str(st.session_state.get("edit_meeting_content", "")).strip()
         future_plan = str(st.session_state.get("edit_future_plan", "")).strip()
-        if not purpose or not participants or not meeting_content:
+        combined_participants = merge_participants(selected_internal_staff, participants)
+        if not purpose or not combined_participants or not meeting_content:
             raise RuntimeError("회의 목적, 참석자 명단, 회의 내용은 필수입니다.")
 
         meeting_date = st.session_state["meeting_date"]
@@ -858,20 +866,25 @@ if "result" in st.session_state:
             "meeting_place": meeting_place,
             "card_merchant": str(st.session_state.get("card_merchant", "")).strip(),
             "amount_raw": _compose_amount_raw(),
-            "participants": participants,
+            "participants": combined_participants,
             "purpose": purpose,
             "meeting_content": meeting_content,
             "future_plan": future_plan,
         }
 
-        participant_items = parse_participants_for_save(participants)
+        external_items = parse_participants_for_save(participants)
+        duplicate_staff = overlapping_staff_names(selected_internal_staff, external_items)
+        participant_items = selected_staff_items(selected_internal_staff) + external_items
         amount_total = max(0, int(st.session_state.get("amount_total", 0) or 0))
-        if amount_total > 0:
-            participant_count, ambiguous_names = _participant_analysis(participants)
+        if amount_total > 0 and not duplicate_staff:
+            external_count, ambiguous_names = _participant_analysis(participants)
         else:
-            participant_count, ambiguous_names = 0, []
+            external_count, ambiguous_names = 0, []
+        participant_count = len(selected_internal_staff) + external_count
         allowed_total = participant_count * MEETING_COST_PER_PERSON
-        participant_count_unknown = amount_total > 0 and participant_count <= 0
+        participant_count_unknown = amount_total > 0 and (
+            participant_count <= 0 or (bool(participants) and external_count <= 0)
+        )
         participant_ambiguity = amount_total > 0 and bool(ambiguous_names)
         over_budget = participant_count > 0 and amount_total > allowed_total
 
@@ -886,7 +899,9 @@ if "result" in st.session_state:
             "meeting_place": meeting_place,
             "card_merchant": form["card_merchant"],
             "amount_raw": form["amount_raw"],
-            "participants": participants,
+            "participants": combined_participants,
+            "external_participants": participants,
+            "internal_staff_ids": [person["id"] for person in selected_internal_staff],
             "purpose": purpose,
             "meeting_content": meeting_content,
             "future_plan": future_plan,
@@ -898,7 +913,17 @@ if "result" in st.session_state:
             business["name"], meeting_date, form["author_name"]
         )
 
-        if participant_ambiguity:
+        if duplicate_staff:
+            if st.button(
+                "최종 회의록 생성",
+                type="primary",
+                key="final_excel_generate_internal_duplicate",
+                use_container_width=True,
+            ):
+                st.error("내부 인원과 참석자 명단에 중복으로 입력된 사람이 있습니다: "
+                         + ", ".join(duplicate_staff)
+                         + ". 기존 참석자 명단에서 중복 항목을 지우거나 내부 체크를 해제해 주세요.")
+        elif participant_ambiguity:
             if st.button(
                 "최종 회의록 생성",
                 type="primary",
