@@ -46,9 +46,10 @@ def render_internal_staff_picker() -> tuple[list[dict], bool]:
             editor_data = pd.DataFrame(
                 [{"id": p["id"], "name": p["name"], "title": p.get("title") or "", "is_active": bool(p["is_active"])} for p in rows]
             )
+            editor_key = f"internal_staff_roster_editor_{st.session_state.get('_internal_staff_editor_version', 0)}"
             edited = st.data_editor(
                 editor_data,
-                key="internal_staff_roster_editor",
+                key=editor_key,
                 hide_index=True,
                 num_rows="fixed",
                 use_container_width=True,
@@ -80,7 +81,7 @@ def render_internal_staff_picker() -> tuple[list[dict], bool]:
                         st.error(f"내부 인원 저장에 실패했습니다: {exc}")
                     else:
                         st.session_state["_internal_staff_save_success"] = "내부 인원 변경사항을 저장했습니다."
-                        st.session_state.pop("internal_staff_roster_editor", None)
+                        st.session_state["_internal_staff_editor_version"] = int(st.session_state.get("_internal_staff_editor_version", 0)) + 1
                         st.rerun()
 
         with st.form("internal_staff_add_form", clear_on_submit=True):
@@ -101,7 +102,7 @@ def render_internal_staff_picker() -> tuple[list[dict], bool]:
                     st.error(f"내부 인원 추가에 실패했습니다: {exc}")
                 else:
                     st.session_state["_internal_staff_save_success"] = "새 내부 인원을 등록했습니다."
-                    st.session_state.pop("internal_staff_roster_editor", None)
+                    st.session_state["_internal_staff_editor_version"] = int(st.session_state.get("_internal_staff_editor_version", 0)) + 1
                     st.rerun()
 
     return selected, True
