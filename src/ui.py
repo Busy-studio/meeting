@@ -7,6 +7,8 @@ from typing import Callable
 import streamlit as st
 import streamlit.components.v1 as components
 
+from .business_values import business_text
+
 
 BUSINESS_FIELDS = {
     "business_name": "name",
@@ -26,6 +28,8 @@ def apply_business_to_state(business: dict | None) -> None:
     business = business or {}
     for state_key, source_key in BUSINESS_FIELDS.items():
         value = business.get(source_key, "")
+        if state_key != "business_round_no":
+            value = business_text(value)
         if state_key == "business_round_no":
             try:
                 value = int(value or 1)
@@ -38,16 +42,16 @@ def apply_business_to_state(business: dict | None) -> None:
 def business_from_state() -> dict:
     return {
         "id": st.session_state.get("business_selected_id") or None,
-        "name": str(st.session_state.get("business_name", "")).strip(),
-        "research_project_name": str(st.session_state.get("business_research_project_name", "")).strip(),
-        "project_number": str(st.session_state.get("business_project_number", "")).strip(),
-        "support_organization": str(st.session_state.get("business_support_organization", "")).strip(),
-        "total_research_period": str(st.session_state.get("business_total_research_period", "")).strip(),
+        "name": business_text(st.session_state.get("business_name", "")),
+        "research_project_name": business_text(st.session_state.get("business_research_project_name", "")),
+        "project_number": business_text(st.session_state.get("business_project_number", "")),
+        "support_organization": business_text(st.session_state.get("business_support_organization", "")),
+        "total_research_period": business_text(st.session_state.get("business_total_research_period", "")),
         "round_no": int(st.session_state.get("business_round_no", 1) or 1),
-        "round_research_period": str(st.session_state.get("business_round_research_period", "")).strip(),
-        "principal_affiliation": str(st.session_state.get("business_principal_affiliation", "")).strip(),
-        "principal_title": str(st.session_state.get("business_principal_title", "")).strip(),
-        "principal_name": str(st.session_state.get("business_principal_name", "")).strip(),
+        "round_research_period": business_text(st.session_state.get("business_round_research_period", "")),
+        "principal_affiliation": business_text(st.session_state.get("business_principal_affiliation", "")),
+        "principal_title": business_text(st.session_state.get("business_principal_title", "")),
+        "principal_name": business_text(st.session_state.get("business_principal_name", "")),
     }
 
 

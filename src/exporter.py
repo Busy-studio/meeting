@@ -8,6 +8,8 @@ from datetime import date
 from pathlib import Path
 from xml.sax.saxutils import escape
 
+from .business_values import business_display
+
 
 TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "assets" / "meeting_template.b64"
 
@@ -117,6 +119,8 @@ def build_meeting_workbook(data: dict[str, object]) -> bytes:
             ),
         }
         for address, value in values.items():
+            if address in {"R4", "AM4", "BA4", "BH4", "K5", "K6", "AM6", "K7", "AM7", "K8"}:
+                value = business_display(value)
             sheet_xml = _set_text(sheet_xml, address, value)
         sheet_xml = _set_number(sheet_xml, "J12", _excel_serial(meeting_date))
         round_no = int(business.get("round_no") or 1)

@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import zipfile
 import xml.etree.ElementTree as ET
+from datetime import date, timedelta
 from pathlib import Path
 
 from pypdf import PdfReader, PdfWriter, Transformation
@@ -79,6 +80,25 @@ def _ensure_one_page_print_setup(workbook: bytes) -> bytes:
         print_options.set("verticalCentered", "1")
 
         book = ET.fromstring(source.read("xl/workbook.xml"))
+        # Freeze the date in the PDF-only copy: Calc must not reinterpret
+        # Excel's locale-dependent yyyy/mm/dd(aaa) number format.
+        date_cell = sheet.find(f'.//{tag("c")}[@r="J12"]')
+        value = date_cell.find(tag("v")) if date_cell is not None else None
+        if date_cell is None or value is None or not value.text:
+            raise RuntimeError("회의록 Excel의 회의일자를 찾을 수 없습니다.")
+        book_props = book.find(tag("workbookPr"))
+        use_1904 = book_props is not None and book_props.get("date1904") in {"1", "true"}
+        epoch = date(1904, 1, 1) if use_1904 else date(1899, 12, 30)
+        try:
+            meeting_date = epoch + timedelta(days=int(value.text))
+        except (ValueError, OverflowError) as exc:
+            raise RuntimeError("회의록 Excel의 회의일자가 올바르지 않습니다.") from exc
+        weekday = "월화수목금토일"[meeting_date.weekday()]
+        for child in list(date_cell):
+            date_cell.remove(child)
+        date_cell.set("t", "inlineStr")
+        text = ET.SubElement(ET.SubElement(date_cell, tag("is")), tag("t"))
+        text.text = f"{meeting_date:%Y/%m/%d}({weekday})"
         sheets = book.find(tag("sheets"))
         if sheets is None or not len(sheets):
             raise RuntimeError("회의록 Excel 시트를 찾을 수 없습니다.")
