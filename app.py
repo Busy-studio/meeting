@@ -987,7 +987,7 @@ if "result" in st.session_state:
 
                     receipt_for_pdf = bytes(uploaded_receipt)
                     pdf_key = hashlib.sha256(
-                        b"a4-print-area-v2\0" + workbook_bytes + receipt_for_pdf
+                        b"a4-korean-date-v3\0" + workbook_bytes + receipt_for_pdf
                         + tax_label.encode("utf-8")
                     ).hexdigest()
                     cached_pdf = st.session_state.get("_combined_pdf_cache") or {}
